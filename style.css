@@ -95,3 +95,29 @@ progress { width: 100%; height: 10px; accent-color: var(--accent); }
   display: grid; place-items: center; cursor: pointer; }
 .cand canvas { max-width: 100%; max-height: 84px; }
 .cand.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--sel); }
+
+#modelBar { position: sticky; top: 0; z-index: 15; background: var(--card); border-bottom: 1px solid var(--line);
+  padding: max(8px, env(safe-area-inset-top)) 14px 8px; font-size: .85rem; color: var(--muted); }
+#modelBar progress { height: 6px; display: block; margin-top: 6px; }
+#modelBar .chip { padding: 3px 10px; }
+
+/* sticky action bar (item page): stays at the top while scrolling */
+.topbar { position: sticky; top: var(--bar-h, 0px); z-index: 12; display: flex; align-items: center; gap: 8px;
+  margin: calc(-1 * max(12px, env(safe-area-inset-top))) -14px 10px; padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+  background: var(--bg); border-bottom: 1px solid var(--line); }
+.topbar .back, .topbar .title { margin: 0; flex: 1; }
+.topbar .btn { padding: 8px 14px; }
+body.downloading .topbar { margin-top: 0; padding-top: 10px; }
+
+/* outfit carousels: one row per layer, the centred slot is the pick */
+.layer { margin-top: 4px; }
+.layer-label { font-size: .75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.carousel { --slot-w: 74px; position: relative; display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none;
+  padding: 2px calc(50% + 14px - var(--slot-w) / 2); margin: 0 -14px; } /* % is of the parent, which is 28px narrower */
+.carousel::-webkit-scrollbar { display: none; }
+.slot { flex: none; width: var(--slot-w); height: calc(var(--slot-w) * 1.2); scroll-snap-align: center; padding: 0; cursor: pointer;
+  border: 2px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; opacity: .45; transform: scale(.86);
+  transition: transform .15s, opacity .15s, border-color .15s; }
+.slot img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.slot.none { background: transparent; border-style: dashed; color: var(--muted); font-size: .85rem; }
+.slot.on { opacity: 1; transform: none; border-color: var(--accent); }

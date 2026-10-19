@@ -4,13 +4,17 @@ A phone-first PWA to keep an inventory of your clothes and combine them into out
 Everything is stored on the device (IndexedDB) — no account, no server.
 
 - **Add** — take a photo or pick several from the gallery. If there are several items or a busy
-  background, **tap the item**: it's cut out (pick one of 3 outlines, or tap more points to
-  add/remove areas) and tagging runs on the cut-out only. The app suggests the **type**
+  background, **tap the item**: it's cut out (pick one of 3 outlines; tap elsewhere to choose
+  another item, tap the dot to undo) and tagging runs on the cut-out only. The app suggests the **type**
   (top-3 chips) and **colour** (dominant + secondary); correct with one tap.
   Cut-out items are stored on white; the original photo is kept too.
 - **Wardrobe** — grid with search (name, notes, type, colour) and type/colour filters.
-- **Outfits** — pick items, name the combination, save.
-- **Settings** — export/import a JSON backup (photos included), manage the model.
+- **Outfits** — one swipe carousel per layer (Outerwear, Tops, Bottoms incl. dresses, Shoes,
+  Accessories; each starts with "none"); the centred item of each row is the outfit.
+- **Settings** — export/import a JSON backup (photos included), AI model status.
+
+The AI models download automatically on first launch (progress bar at the top); the app is
+usable meanwhile and anything that needs them waits.
 
 ## How tagging works
 

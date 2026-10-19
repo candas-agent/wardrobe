@@ -8,9 +8,9 @@ const classifier = () => import('./classify.js'); // loaded lazily; onnxruntime 
 
 let types = [], typeById = {};
 const filters = { q: '', group: '', colour: '' };
-let addQueue = [];
+let addQueue = [], addTotal = 0;
 let currentDraft = null; // draft shown in the add form; late type results for other drafts are dropped
-let builder = null; // outfit being edited: { id, name, createdAt, itemIds: Set, group }
+let builder = null; // outfit being edited: { id, isNew, name, createdAt, picks: { layer: itemId|null } }
 
 // ---------- helpers ----------
 
@@ -126,7 +126,7 @@ function itemForm(draft, { saveLabel, photoHtml, extra = '' }) {
     <label class="field">Notes (optional)</label>
     <textarea id="notes" placeholder="Brand, size, where it's stored…">${esc(draft.notes)}</textarea>
     ${extra}
-    <div class="actions" id="formActions">${saveLabel}</div>`;
+    ${saveLabel ? `<div class="actions" id="formActions">${saveLabel}</div>` : ''}`;
 }
 
 // Wires up the form; draft is mutated in place as the user picks values.
@@ -171,61 +171,29 @@ const toItem = d => ({
 
 // ---------- add ----------
 
-const modelPanel = () => `<div class="panel" id="modelPanel">
-  <strong>AI helpers</strong>
-  <p class="muted">Type detection and tap-to-select need a one-time ${models.TOTAL_MB} MB download (Wi-Fi recommended).
-  After that they work offline. Colour detection works without it.</p>
-  <button class="btn block" id="dl">Download models</button>
-  <progress id="dlProg" value="0" max="1" hidden></progress>
-  <div class="status" id="dlStatus"></div>
-</div>`;
-
 async function addView() {
   if (addQueue.length) return addNext();
-  const hasModel = await models.modelsDownloaded().catch(() => false);
   view.innerHTML = `
     <h1>Add clothes</h1>
     <p class="muted">Photograph your clothes. If there are several items or a busy background, you can tap the one you want.</p>
     <div class="row" style="margin:16px 0">
       <label class="btn primary grow">📷 Take photo<input type="file" accept="image/*" capture="environment" hidden id="camera"></label>
       <label class="btn grow">🖼️ From gallery<input type="file" accept="image/*" multiple hidden id="gallery"></label>
-    </div>
-    ${hasModel ? '' : modelPanel()}`;
+    </div>`;
 
   const onFiles = e => {
     addQueue = [...e.target.files];
+    addTotal = addQueue.length;
     if (addQueue.length) addNext();
   };
   $('#camera').addEventListener('change', onFiles);
   $('#gallery').addEventListener('change', onFiles);
-  $('#dl')?.addEventListener('click', () => downloadModels($('#dl'), $('#dlProg'), $('#dlStatus')));
 }
 
-async function downloadModels(btn, prog, status) {
-  btn.disabled = true;
-  prog.hidden = false;
-  status.textContent = 'Downloading…';
-  try {
-    await models.downloadModels(p => { prog.value = p; status.textContent = `Downloading… ${Math.round(p * 100)}%`; });
-    status.textContent = 'Ready. Type detection and tap-to-select are on.';
-    btn.hidden = true;
-  } catch (err) {
-    status.textContent = `Failed: ${err.message}`;
-    btn.disabled = false;
-  }
-}
-
-const stageHtml = hasModel => `
-  <canvas class="stage" id="stage"></canvas>
-  ${hasModel ? `
-  <div class="row stage-tools">
-    <div class="chips" id="mode">
-      <button class="chip on" data-v="1">＋ Add area</button><button class="chip" data-v="0">− Remove area</button>
-    </div>
-    <button class="chip" id="reset" hidden>Reset</button>
-  </div>
-  <div class="status" id="segStatus">Tap the item to cut it out, or skip this if it's the only thing in the photo.</div>
-  <div class="cands" id="cands"></div>` : ''}`;
+const stageHtml = `
+  <canvas class="stage tappable" id="stage"></canvas>
+  <div class="status" id="segStatus">Several things in the photo? Tap the item you want.</div>
+  <div class="cands" id="cands"></div>`;
 
 async function addNext() {
   const file = addQueue.shift();
@@ -246,19 +214,18 @@ async function addNext() {
   const [photo, thumb] = await Promise.all([resizeToBlob(work, 1280, 0.85), resizeToBlob(work, 400, 0.8)]);
   const draft = {
     id: db.newId(), createdAt: Date.now(), type: '', colour: '', colour2: '', name: '', notes: '',
-    photo, thumb, work, points: [], masks: null, maskIdx: 0, cut: null, include: true,
+    photo, thumb, work, points: [], masks: null, maskIdx: 0, cut: null,
   };
   currentDraft = draft;
 
-  const [cls, hasModel] = await Promise.all([classifier(), models.modelsDownloaded().catch(() => false)]);
+  const cls = await classifier();
   if (!location.hash.startsWith('#/add')) return; // user navigated away meanwhile
 
-  const left = addQueue.length;
-  view.innerHTML = `<h1>Add clothes</h1>` + itemForm(draft, {
-    photoHtml: stageHtml(hasModel),
-    saveLabel: `<button class="btn" id="skip">Skip</button>
-      <button class="btn primary" id="save">${left ? `Save & next (${left} left)` : 'Save'}</button>`,
-  });
+  const pos = addTotal > 1 ? ` <span class="muted">${addTotal - addQueue.length} of ${addTotal}</span>` : '';
+  view.innerHTML = `<div class="topbar">
+      <strong class="title">Add clothes${pos}</strong>
+      <button class="btn" id="skip">Skip</button><button class="btn primary" id="save">Save</button>
+    </div>` + itemForm(draft, { photoHtml: stageHtml });
   const form = bindItemForm(draft);
   const stage = $('#stage');
   stage.width = work.width;
@@ -278,32 +245,31 @@ async function addNext() {
     addNext();
   });
 
-  if (hasModel) {
-    stage.classList.add('tappable');
-    stage.addEventListener('click', e => {
-      const r = stage.getBoundingClientRect();
-      draft.points.push({ x: (e.clientX - r.left) / r.width * work.width, y: (e.clientY - r.top) / r.height * work.height, include: draft.include });
-      runSegment(draft, form);
-    });
-    $('#mode').addEventListener('click', e => {
-      const b = e.target.closest('.chip'); if (!b) return;
-      draft.include = b.dataset.v === '1';
-      $$('#mode .chip').forEach(c => c.classList.toggle('on', c === b));
-    });
-    $('#reset').addEventListener('click', () => {
-      Object.assign(draft, { points: [], masks: null, cut: null });
-      $('#cands').innerHTML = '';
-      $('#reset').hidden = true;
-      $('#segStatus').textContent = 'Tap the item to cut it out.';
-      drawStage(draft);
-      retag(draft, form, cls, draft.work, true);
-    });
-  }
+  // a tap selects the item under it (replacing any previous selection); tapping the dot again clears it
+  stage.addEventListener('click', e => {
+    const r = stage.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * work.width, y = (e.clientY - r.top) / r.height * work.height;
+    const [p] = draft.points;
+    if (p && Math.hypot(p.x - x, p.y - y) < dotRadius(stage) * 1.8) return resetSelection(draft, form, cls);
+    draft.points = [{ x, y, include: true }];
+    runSegment(draft, form);
+  });
 
-  retag(draft, form, cls, work, hasModel);
+  retag(draft, form, cls, work, true);
   // start the heavy SAM encoder in the background so the first tap feels instant
-  if (hasModel) draft.enc = seg().then(m => m.encode(work));
+  draft.enc = seg().then(m => m.encode(work));
+  draft.enc.catch(() => { draft.enc = null; });
 }
+
+function resetSelection(draft, form, cls) {
+  Object.assign(draft, { points: [], masks: null, cut: null });
+  $('#cands').innerHTML = '';
+  $('#segStatus').textContent = 'Several things in the photo? Tap the item you want.';
+  drawStage(draft);
+  retag(draft, form, cls, draft.work, true);
+}
+
+const dotRadius = stage => Math.max(8, stage.width / 70);
 
 const seg = () => import('./segment.js');
 
@@ -324,11 +290,11 @@ function drawStage(draft) {
     d.drawImage(mask.canvas, 0, 0);
     ctx.drawImage(dimmed, 0, 0);
   }
-  const r = Math.max(8, stage.width / 70);
+  const r = dotRadius(stage);
   for (const p of draft.points) {
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = p.include ? '#2e9d4a' : '#d23a3a';
+    ctx.fillStyle = '#2e9d4a';
     ctx.fill();
     ctx.lineWidth = r / 3;
     ctx.strokeStyle = '#fff';
@@ -344,13 +310,12 @@ async function runSegment(draft, form) {
     const m = await seg();
     draft.enc ??= m.encode(draft.work);
     const enc = await draft.enc;
-    const points = [...draft.points];
+    const points = draft.points;
     const res = await m.segment(enc, points);
-    if (draft !== currentDraft || points.length !== draft.points.length) return; // a newer tap is in flight
+    if (draft !== currentDraft || points !== draft.points) return; // a newer tap replaced this one
     draft.masks = res.masks;
     draft.maskIdx = res.best;
-    $('#reset').hidden = false;
-    status.textContent = 'Not quite right? Pick another outline below, or tap again to add or remove areas.';
+    status.textContent = 'Pick the best outline below. Tap elsewhere to choose another item, or the dot to undo.';
     renderCands(draft, form);
     applyMask(draft, form);
   } catch (err) {
@@ -424,12 +389,14 @@ async function itemView(id) {
   if (!item) { view.innerHTML = `<p>Item not found.</p><a href="#/">Back</a>`; return; }
   const outfits = (await db.getAll('outfits')).filter(o => o.itemIds.includes(id));
   const draft = { ...item, colourSuggestions: [], typeSuggestions: [] };
-  view.innerHTML = `<a class="back" href="#/">‹ Wardrobe</a>` + itemForm(draft, {
+  view.innerHTML = `<div class="topbar">
+      <a class="back grow" href="#/">‹ Wardrobe</a>
+      <button class="btn danger" id="del">Delete</button><button class="btn primary" id="save">Save</button>
+    </div>` + itemForm(draft, {
     photoHtml: `<img class="photo" id="photo" src="${blobUrl(item.photo)}" alt="">
       ${item.original ? '<button class="chip" id="toggleOrig" style="margin-top:8px">Show original photo</button>' : ''}`,
     extra: outfits.length ? `<h2>In outfits</h2><div class="chips wrap">${outfits.map(o =>
       `<a class="chip" href="#/outfit/${o.id}">${esc(o.name || 'Outfit')}</a>`).join('')}</div>` : '',
-    saveLabel: `<button class="btn danger" id="del">Delete</button><button class="btn primary" id="save">Save</button>`,
   });
   bindItemForm(draft);
   $('#toggleOrig')?.addEventListener('click', e => {
@@ -468,57 +435,73 @@ async function outfitsView() {
       <p>${items.length ? 'No outfits yet. Combine a few items into one.' : 'Add some clothes first, then combine them here.'}</p></div>`}`;
 }
 
+// One carousel per layer; the centred slot of each row is the outfit. Slot 0 of every row is "none".
+const LAYERS = [
+  { key: 'outer', label: 'Outerwear', groups: ['Outerwear'] },
+  { key: 'top', label: 'Tops', groups: ['Tops'] },
+  { key: 'bottom', label: 'Bottoms', groups: ['Bottoms', 'Full body'] },
+  { key: 'shoes', label: 'Shoes', groups: ['Shoes'] },
+  { key: 'acc', label: 'Accessories', groups: ['Accessories'] },
+];
+const NEW_OUTFIT_STARTS_WITH = ['top', 'bottom', 'shoes']; // other layers start on "none"
+
 async function outfitView(id) {
   const items = (await db.getAll('items')).sort((a, b) => b.createdAt - a.createdAt);
-  if (builder?.id !== id && !(id === 'new' && builder?.isNew)) {
+  const rows = LAYERS.map(l => ({ ...l, items: items.filter(i => l.groups.includes(typeById[i.type]?.group)) }));
+  if (builder?.id !== id) {
     const o = id === 'new' ? null : await db.get('outfits', id);
     if (id !== 'new' && !o) { view.innerHTML = `<p>Outfit not found.</p><a href="#/outfits">Back</a>`; return; }
-    builder = o
-      ? { id: o.id, name: o.name, createdAt: o.createdAt, itemIds: new Set(o.itemIds), q: '', group: '' }
-      : { id: 'new', isNew: true, name: '', createdAt: Date.now(), itemIds: new Set(), q: '', group: '' };
+    const picks = Object.fromEntries(rows.map(r => [r.key,
+      o ? r.items.find(i => o.itemIds.includes(i.id))?.id ?? null
+        : NEW_OUTFIT_STARTS_WITH.includes(r.key) ? r.items[0]?.id ?? null : null]));
+    builder = { id, isNew: !o, name: o?.name ?? '', createdAt: o?.createdAt ?? Date.now(), picks };
   }
   const b = builder;
-  const byId = Object.fromEntries(items.map(i => [i.id, i]));
 
   view.innerHTML = `
-    <a class="back" href="#/outfits">‹ Outfits</a>
-    <input type="text" id="oname" placeholder="Outfit name, e.g. Friday office" value="${esc(b.name)}">
-    <h2>Selected</h2>
-    <div class="strip" id="strip"></div>
-    <h2>Pick items</h2>
-    <input type="search" id="oq" placeholder="Search" value="${esc(b.q)}">
-    ${groupChips(b.group)}
-    <div class="grid" id="ogrid"></div>
-    <div class="actions">
+    <div class="topbar">
+      <a class="back" href="#/outfits">‹ Outfits</a>
       ${b.isNew ? '' : '<button class="btn danger" id="odel">Delete</button>'}
-      <button class="btn primary" id="osave">Save outfit</button>
-    </div>`;
+      <button class="btn primary" id="osave">Save</button>
+    </div>
+    <input type="text" id="oname" placeholder="Outfit name, e.g. Friday office" value="${esc(b.name)}">
+    ${rows.map(r => `
+      <div class="layer">
+        <div class="layer-label">${r.label}</div>
+        <div class="carousel" data-layer="${r.key}">
+          <button class="slot none" data-id=""><span>None</span></button>
+          ${r.items.map(i => `<button class="slot" data-id="${i.id}"><img src="${blobUrl(i.thumb)}" alt="${esc(itemTitle(i))}"></button>`).join('')}
+        </div>
+      </div>`).join('')}`;
 
-  const renderStrip = () => {
-    const sel = [...b.itemIds].map(i => byId[i]).filter(Boolean);
-    $('#strip').innerHTML = sel.length
-      ? sel.map(i => `<img src="${blobUrl(i.thumb)}" data-id="${i.id}" alt="${esc(itemTitle(i))}">`).join('')
-      : `<span class="muted" style="align-self:center;padding:0 8px">Tap items below to add them.</span>`;
-  };
-  const renderGrid = () => {
-    const shown = items.filter(i => matches(i, b));
-    $('#ogrid').innerHTML = shown.map(i => itemCard(i, { selected: b.itemIds.has(i.id) })).join('')
-      || `<p class="muted">Nothing matches.</p>`;
-  };
-  const toggle = itemId => {
-    b.itemIds.has(itemId) ? b.itemIds.delete(itemId) : b.itemIds.add(itemId);
-    renderStrip();
-    $(`#ogrid [data-id="${itemId}"]`)?.classList.toggle('sel', b.itemIds.has(itemId));
-  };
+  // center the slot of each row's current pick, then keep picks in sync with scrolling
+  for (const car of $$('.carousel')) {
+    const key = car.dataset.layer;
+    const slots = [...car.children];
+    const centreOn = (slot, behavior = 'instant') =>
+      car.scrollTo({ left: slot.offsetLeft - (car.clientWidth - slot.offsetWidth) / 2, behavior });
+    const nearest = () => {
+      const mid = car.scrollLeft + car.clientWidth / 2;
+      return slots.reduce((best, s) => Math.abs(s.offsetLeft + s.offsetWidth / 2 - mid)
+        < Math.abs(best.offsetLeft + best.offsetWidth / 2 - mid) ? s : best);
+    };
+    const mark = () => {
+      const n = nearest();
+      slots.forEach(s => s.classList.toggle('on', s === n));
+      b.picks[key] = n.dataset.id || null;
+    };
+    centreOn(slots.find(s => s.dataset.id === (b.picks[key] ?? '')) ?? slots[0]);
+    mark();
+    let raf;
+    car.addEventListener('scroll', () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(mark); });
+    car.addEventListener('click', e => { const s = e.target.closest('.slot'); if (s) centreOn(s, 'smooth'); });
+  }
 
   $('#oname').addEventListener('input', e => { b.name = e.target.value; });
-  $('#oq').addEventListener('input', e => { b.q = e.target.value.trim(); renderGrid(); });
-  onChips('group', v => { b.group = v; renderGrid(); });
-  $('#ogrid').addEventListener('click', e => { const c = e.target.closest('.card'); if (c) toggle(c.dataset.id); });
-  $('#strip').addEventListener('click', e => { const i = e.target.closest('img'); if (i) toggle(i.dataset.id); });
   $('#osave').addEventListener('click', async () => {
-    if (!b.itemIds.size) return toast('Pick at least one item');
-    await db.put('outfits', { id: b.isNew ? db.newId() : b.id, name: b.name.trim(), createdAt: b.createdAt, itemIds: [...b.itemIds] });
+    const itemIds = LAYERS.map(l => b.picks[l.key]).filter(Boolean);
+    if (!itemIds.length) return toast('Pick at least one item');
+    await db.put('outfits', { id: b.isNew ? db.newId() : b.id, name: b.name.trim(), createdAt: b.createdAt, itemIds });
     builder = null;
     toast('Outfit saved');
     location.hash = '#/outfits';
@@ -529,8 +512,6 @@ async function outfitView(id) {
     builder = null;
     location.hash = '#/outfits';
   });
-  renderStrip();
-  renderGrid();
 }
 
 // ---------- settings / backup ----------
@@ -594,11 +575,10 @@ async function settingsView() {
       <div class="status" id="bstatus"></div>
     </div>
     <div class="panel">
-      <strong>AI helpers (type detection, tap-to-select)</strong>
-      <p class="muted">${hasModel ? `Downloaded (${models.TOTAL_MB} MB), works offline.` : 'Not downloaded. Types must be picked by hand.'}</p>
-      ${hasModel ? '<button class="btn block" id="rmModel">Remove models</button>'
-        : `<button class="btn block" id="dl">Download models (${models.TOTAL_MB} MB)</button><progress id="dlProg" value="0" max="1" hidden></progress>`}
-      <div class="status" id="dlStatus"></div>
+      <strong>AI helpers</strong>
+      <p class="muted">${hasModel ? `Type detection and tap-to-select are ready (${models.TOTAL_MB} MB, work offline).`
+        : 'Downloading (see the bar at the top)…'}</p>
+    </div>
     </div>
     <p class="muted" style="font-size:.8rem">Type detection: OpenAI CLIP ViT-B/32. Tap-to-select: SlimSAM (Segment Anything). Both run on-device via onnxruntime-web.</p>`;
 
@@ -613,8 +593,6 @@ async function settingsView() {
     try { const n = await importBackup(f); toast(`Imported ${n} items`); settingsView(); }
     catch (err) { $('#bstatus').textContent = `Import failed: ${err.message}`; }
   });
-  $('#dl')?.addEventListener('click', () => downloadModels($('#dl'), $('#dlProg'), $('#dlStatus')));
-  $('#rmModel')?.addEventListener('click', async () => { await models.deleteModels(); settingsView(); });
 }
 
 // ---------- router ----------
@@ -643,5 +621,35 @@ types = await loadTypes();
 typeById = Object.fromEntries(types.map(t => [t.id, t]));
 window.addEventListener('hashchange', render);
 render();
+prepareModels();
+
+// Downloads the AI models on first launch, with a progress bar; the app stays usable meanwhile.
+async function prepareModels() {
+  if (await models.modelsDownloaded().catch(() => false)) return;
+  const bar = document.getElementById('modelBar'), text = document.getElementById('modelText');
+  const prog = document.getElementById('modelProg'), retry = document.getElementById('modelRetry');
+  bar.hidden = false;
+  document.body.classList.add('downloading');
+  document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); // sticky item bar sits below it
+  retry.hidden = true;
+  prog.hidden = false;
+  text.textContent = `Preparing AI helpers (one-time, ${models.TOTAL_MB} MB)…`;
+  retry.onclick = prepareModels;
+  try {
+    await models.ensureModels(p => {
+      prog.value = p;
+      text.textContent = `Preparing AI helpers (one-time, ${models.TOTAL_MB} MB)… ${Math.round(p * 100)}%`;
+    });
+    bar.hidden = true;
+    document.body.classList.remove('downloading');
+    document.documentElement.style.removeProperty('--bar-h');
+    if (location.hash.startsWith('#/settings')) render();
+  } catch (err) {
+    console.warn(err);
+    text.textContent = "AI helpers couldn't download. Check your connection.";
+    prog.hidden = true;
+    retry.hidden = false;
+  }
+}
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');

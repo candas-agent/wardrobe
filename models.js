@@ -32,11 +32,6 @@ export async function modelsDownloaded() {
   return hits.every(Boolean);
 }
 
-export async function deleteModels() {
-  for (const k in sessions) delete sessions[k];
-  await caches.delete(CACHE);
-}
-
 async function fetchInto(cache, model, onBytes) {
   const res = await fetch(model.url);
   if (!res.ok) throw new Error(`Model download failed (${res.status})`);
@@ -52,7 +47,7 @@ async function fetchInto(cache, model, onBytes) {
 }
 
 // Downloads whatever isn't cached yet. onProgress gets 0..1 over all models.
-export async function downloadModels(onProgress) {
+async function downloadModels(onProgress) {
   const cache = await caches.open(CACHE);
   const all = Object.values(MODELS);
   const total = all.reduce((s, m) => s + m.size, 0);
@@ -64,8 +59,19 @@ export async function downloadModels(onProgress) {
   onProgress?.(1);
 }
 
+// Starts (or joins) the one-time download. Listeners get progress 0..1.
+let readyPromise;
+const listeners = new Set();
+export function ensureModels(onProgress) {
+  if (onProgress) listeners.add(onProgress);
+  readyPromise ??= downloadModels(p => listeners.forEach(f => f(p)));
+  readyPromise.catch(() => { readyPromise = undefined; });
+  return readyPromise;
+}
+
 export function getSession(name) {
   sessions[name] ??= (async () => {
+    await ensureModels(); // waits for an ongoing download
     const [ort, cache] = await Promise.all([getOrt(), caches.open(CACHE)]);
     const res = await cache.match(MODELS[name].url);
     if (!res) throw new Error('Models not downloaded');
