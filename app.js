@@ -3,6 +3,7 @@ import { GROUPS, PALETTE, colourById, loadTypes } from './catalog.js';
 
 const view = document.getElementById('view');
 import * as models from './models.js';
+import * as fp from './fingerprint.js';
 
 const classifier = () => import('./classify.js'); // loaded lazily; onnxruntime itself loads on first use
 
@@ -78,15 +79,18 @@ async function resizeToBlob(bmp, max, quality) {
 
 async function wardrobeView() {
   const items = (await db.getAll('items')).sort((a, b) => b.createdAt - a.createdAt);
+  const header = `<div class="topbar">
+      <strong class="title">Wardrobe${items.length ? ` <span class="muted">${items.length}</span>` : ''}</strong>
+      ${addButton('+ Add')}
+    </div>`;
   if (!items.length) {
-    view.innerHTML = `<h1>Wardrobe</h1>
-      <div class="empty"><div class="big">👗</div><p>No clothes yet.</p>
-      <a class="btn primary" href="#/add">Add your first item</a></div>`;
+    view.innerHTML = header + `
+      <div class="empty"><div class="big">👗</div><p>No clothes yet.</p>${addButton('Add your first item', 'addFirst')}</div>`;
+    bindAddButtons();
     return;
   }
   const colours = PALETTE.filter(c => items.some(i => i.colour === c.id || i.colour2 === c.id));
-  view.innerHTML = `
-    <h1>Wardrobe <small class="muted">${items.length}</small></h1>
+  view.innerHTML = header + `
     <input type="search" id="q" placeholder="Search: e.g. blue jeans" value="${esc(filters.q)}">
     ${groupChips(filters.group)}
     <div class="chips" data-chips="colour">
@@ -101,6 +105,7 @@ async function wardrobeView() {
       ? shown.map(i => itemCard(i, { href: `#/item/${i.id}` })).join('')
       : `<p class="muted">Nothing matches.</p>`;
   };
+  bindAddButtons();
   $('#q').addEventListener('input', e => { filters.q = e.target.value.trim(); renderGrid(); });
   onChips('group', v => { filters.group = v; renderGrid(); });
   onChips('colour', v => { filters.colour = v; renderGrid(); });
@@ -167,27 +172,54 @@ function bindItemForm(draft) {
 const toItem = d => ({
   id: d.id, createdAt: d.createdAt, type: d.type, colour: d.colour, colour2: d.colour2 || '',
   name: d.name.trim(), notes: d.notes.trim(), photo: d.photo, thumb: d.thumb, original: d.original ?? null,
+  source: d.source ?? null,
 });
+
+// ---------- duplicate warning ----------
+
+// Items whose photo is the same file, or the same picture re-saved (resized/recompressed).
+const findDupes = (items, source) => items.filter(i => i.source && (i.source.sha256 === source.sha256
+  || i.source.tiny && fp.distance(i.source.tiny, source.tiny) <= fp.SAME_PICTURE));
+
+const dupeNotice = dupes => !dupes.length ? '' : `
+  <div class="notice">
+    <strong>This photo is already in your wardrobe</strong>
+    <div class="dupes">${dupes.map(i => `<a href="#/item/${i.id}"><img src="${blobUrl(i.thumb)}" alt="">
+      <span>${esc(itemTitle(i))}<br><small class="muted">added ${new Date(i.createdAt).toLocaleDateString()}</small></span></a>`).join('')}</div>
+    <small class="muted">Skip it, or tap another item in the photo to add that one.</small>
+  </div>`;
+
+// Items added before fingerprints existed: fingerprint their stored photo (no sha256, the file is gone).
+async function backfillFingerprints() {
+  for (const item of await db.getAll('items')) {
+    if (item.source?.tiny) continue;
+    try {
+      const bmp = await createImageBitmap(item.original ?? item.photo);
+      const tiny = fp.tiny(bmp);
+      bmp.close();
+      const fresh = await db.get('items', item.id); // the user may have edited it meanwhile
+      if (fresh) await db.put('items', { ...fresh, source: { ...fresh.source, tiny } });
+    } catch (err) { console.warn('fingerprint', item.id, err); }
+  }
+}
 
 // ---------- add ----------
 
+// The Add button opens the phone's picker directly (it offers camera and gallery), then the add flow.
+const addButton = (label, id = 'addFiles') =>
+  `<label class="btn primary">${label}<input type="file" accept="image/*" multiple hidden id="${id}" class="add-files"></label>`;
+
+function bindAddButtons() {
+  $$('.add-files').forEach(input => input.addEventListener('change', () => {
+    addQueue = [...input.files];
+    addTotal = addQueue.length;
+    if (addQueue.length) location.hash = '#/add';
+  }));
+}
+
 async function addView() {
   if (addQueue.length) return addNext();
-  view.innerHTML = `
-    <h1>Add clothes</h1>
-    <p class="muted">Photograph your clothes. If there are several items or a busy background, you can tap the one you want.</p>
-    <div class="row" style="margin:16px 0">
-      <label class="btn primary grow">📷 Take photo<input type="file" accept="image/*" capture="environment" hidden id="camera"></label>
-      <label class="btn grow">🖼️ From gallery<input type="file" accept="image/*" multiple hidden id="gallery"></label>
-    </div>`;
-
-  const onFiles = e => {
-    addQueue = [...e.target.files];
-    addTotal = addQueue.length;
-    if (addQueue.length) addNext();
-  };
-  $('#camera').addEventListener('change', onFiles);
-  $('#gallery').addEventListener('change', onFiles);
+  location.replace('#/'); // nothing queued (e.g. back/forward or a reload): show the wardrobe
 }
 
 const stageHtml = `
@@ -197,7 +229,7 @@ const stageHtml = `
 
 async function addNext() {
   const file = addQueue.shift();
-  if (!file) return render();
+  if (!file) return location.replace('#/'); // batch done: back to the wardrobe
   view.innerHTML = `<h1>Add clothes</h1><p class="status">Reading photo…</p>`;
   let bmp;
   try {
@@ -211,10 +243,13 @@ async function addNext() {
   const work = new OffscreenCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
   work.getContext('2d').drawImage(bmp, 0, 0, work.width, work.height);
   bmp.close();
-  const [photo, thumb] = await Promise.all([resizeToBlob(work, 1280, 0.85), resizeToBlob(work, 400, 0.8)]);
+  const [photo, thumb, sha256, items] = await Promise.all([
+    resizeToBlob(work, 1280, 0.85), resizeToBlob(work, 400, 0.8), fp.sha256(file), db.getAll('items')]);
+  const source = { sha256, tiny: fp.tiny(work), name: file.name, size: file.size };
+  const dupes = findDupes(items, source);
   const draft = {
     id: db.newId(), createdAt: Date.now(), type: '', colour: '', colour2: '', name: '', notes: '',
-    photo, thumb, work, points: [], masks: null, maskIdx: 0, cut: null,
+    photo, thumb, work, source, points: [], masks: null, maskIdx: 0, cut: null,
   };
   currentDraft = draft;
 
@@ -225,7 +260,7 @@ async function addNext() {
   view.innerHTML = `<div class="topbar">
       <strong class="title">Add clothes${pos}</strong>
       <button class="btn" id="skip">Skip</button><button class="btn primary" id="save">Save</button>
-    </div>` + itemForm(draft, { photoHtml: stageHtml });
+    </div>` + dupeNotice(dupes) + itemForm(draft, { photoHtml: stageHtml });
   const form = bindItemForm(draft);
   const stage = $('#stage');
   stage.width = work.width;
@@ -425,7 +460,7 @@ async function outfitsView() {
   const byId = Object.fromEntries(items.map(i => [i.id, i]));
   outfits.sort((a, b) => b.createdAt - a.createdAt);
   view.innerHTML = `
-    <div class="row"><h1 class="grow">Outfits</h1><a class="btn primary" href="#/outfit/new">＋ New</a></div>
+    <div class="row"><h1 class="grow">Outfits</h1><a class="btn primary" href="#/outfit/new">+ New</a></div>
     ${outfits.length ? outfits.map(o => {
       const its = o.itemIds.map(id => byId[id]).filter(Boolean);
       return `<a class="outfit" href="#/outfit/${o.id}">
@@ -599,7 +634,7 @@ async function settingsView() {
 
 async function render() {
   const [, route = '', arg] = location.hash.split('/');
-  const tab = { '': 'wardrobe', item: 'wardrobe', add: 'add', outfits: 'outfits', outfit: 'outfits', settings: 'settings' }[route];
+  const tab = { '': 'wardrobe', item: 'wardrobe', add: 'wardrobe', outfits: 'outfits', outfit: 'outfits', settings: 'settings' }[route];
   document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
   if (route !== 'outfit') builder = null;
   if (route !== 'add') addQueue = [];
@@ -622,6 +657,7 @@ typeById = Object.fromEntries(types.map(t => [t.id, t]));
 window.addEventListener('hashchange', render);
 render();
 prepareModels();
+backfillFingerprints();
 
 // Downloads the AI models on first launch, with a progress bar; the app stays usable meanwhile.
 async function prepareModels() {
@@ -652,4 +688,19 @@ async function prepareModels() {
   }
 }
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    // home-screen apps stay alive in the background: look for updates whenever the app comes back
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update(); });
+  });
+  // a new version took over: reload to run it, but never in the middle of adding/editing something
+  const hadController = !!navigator.serviceWorker.controller;
+  const busy = () => /^#\/(add|item|outfit\/)/.test(location.hash);
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return; // first install, nothing old is running
+    if (!busy()) return location.reload();
+    window.addEventListener('hashchange', function later() {
+      if (!busy()) { window.removeEventListener('hashchange', later); location.reload(); }
+    });
+  });
+}

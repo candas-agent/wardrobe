@@ -3,11 +3,14 @@
 A phone-first PWA to keep an inventory of your clothes and combine them into outfits.
 Everything is stored on the device (IndexedDB) — no account, no server.
 
-- **Add** — take a photo or pick several from the gallery. If there are several items or a busy
+- **Add** — the **+ Add** button on the Wardrobe tab opens the phone's picker (camera or gallery,
+  several photos at once). If there are several items or a busy
   background, **tap the item**: it's cut out (pick one of 3 outlines; tap elsewhere to choose
   another item, tap the dot to undo) and tagging runs on the cut-out only. The app suggests the **type**
   (top-3 chips) and **colour** (dominant + secondary); correct with one tap.
   Cut-out items are stored on white; the original photo is kept too.
+  If the photo is already in your wardrobe (same file, or the same picture re-saved/resized),
+  a notice shows which items were made from it.
 - **Wardrobe** — grid with search (name, notes, type, colour) and type/colour filters.
 - **Outfits** — one swipe carousel per layer (Outerwear, Tops, Bottoms incl. dresses, Shoes,
   Accessories; each starts with "none"); the centred item of each row is the outfit.
@@ -41,6 +44,7 @@ Best results: one item, laid flat or on a hanger, plain background, good light.
 | `models.js` | model download/cache, onnxruntime sessions |
 | `classify.js` | CLIP type detection + colour extraction |
 | `segment.js` | SlimSAM tap-to-select, cut-outs |
+| `fingerprint.js` | photo fingerprints (SHA-256 + 16×16 colour thumbnail) for duplicate warnings |
 | `labels.json` | precomputed CLIP text embeddings (generated) |
 | `sw.js`, `manifest.webmanifest`, `icons/` | offline + installable |
 | `tools/` | Python script that generates `labels.json` |
@@ -56,4 +60,5 @@ Edit `tools/labels.py`, then regenerate (needs `onnxruntime tokenizers numpy hug
     python -m http.server 8000
 
 and open http://localhost:8000 (service workers need localhost or HTTPS).
-After deploying changes, bump `CACHE` in `sw.js`.
+After deploying changes, bump `CACHE` in `sw.js`. Installed apps pick up the new version the next
+time they come to the foreground (they reload themselves, except while adding/editing).

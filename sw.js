@@ -1,13 +1,16 @@
 // Offline support. App files: network-first (updates arrive when online), cache fallback.
+// 'no-cache' revalidates with the server instead of using the browser's HTTP cache (GitHub Pages: 10 min).
 // onnxruntime from the CDN: cache-first (version-pinned URLs never change).
 // The CLIP model is cached separately by classify.js.
 
-const CACHE = 'wardrobe-app-v3';
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'db.js', 'catalog.js', 'classify.js', 'models.js', 'segment.js', 'labels.json',
+const CACHE = 'wardrobe-app-v5';
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'db.js', 'catalog.js', 'classify.js', 'models.js', 'segment.js', 'fingerprint.js', 'labels.json',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'no-cache' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -33,7 +36,7 @@ self.addEventListener('fetch', e => {
   }
 
   if (url.origin === location.origin) {
-    e.respondWith(fetch(req).then(res => {
+    e.respondWith(fetch(req, { cache: 'no-cache' }).then(res => {
       if (res.ok) caches.open(CACHE).then(c => c.put(req, res.clone()));
       return res;
     }).catch(async () => (await caches.match(req, { ignoreSearch: true })) ?? caches.match('index.html')));
