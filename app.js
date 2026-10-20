@@ -935,7 +935,8 @@ async function settingsView() {
         : 'Downloading (see the bar at the top)…'}<br>Running on: ${await models.backendLabel()}</p>
       ${await models.gpuAvailable() ? `<label class="row"><input type="checkbox" id="gpu"${models.gpuState() ? '' : ' checked'}>
         <span class="grow">Use the graphics chip for tap-to-select</span></label>
-        ${models.gpuState() === 'failed' ? '<p class="muted small">It was switched off because it failed on this phone. Tick it to try again.</p>' : ''}`
+        ${models.gpuState() === 'failed' ? `<p class="muted small">Switched off automatically on this phone: ${esc(models.gpuFailReason() ?? 'it failed')}.
+          Tick it to try again.</p>` : ''}`
         : '<p class="muted small">This browser has no graphics chip access (WebGPU), so the processor is used.</p>'}
     </div>
     </div>

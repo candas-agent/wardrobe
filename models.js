@@ -31,6 +31,8 @@ export const THREADS = VIA_SW && self.crossOriginIsolated
 // ---- graphics chip
 
 const GPU_PREF = 'wardrobe-gpu'; // localStorage: 'off' (switched off in Settings) | 'failed' (didn't work here)
+const GPU_REASON = 'wardrobe-gpu-reason';
+export const gpuFailReason = () => localStorage.getItem(GPU_REASON);
 let gpuAvailablePromise;
 export function gpuAvailable() {
   gpuAvailablePromise ??= (async () => !!(await navigator.gpu?.requestAdapter().catch(() => null)))();
@@ -38,15 +40,55 @@ export function gpuAvailable() {
 }
 export const gpuState = () => localStorage.getItem(GPU_PREF);
 export async function useGpu() { return !gpuState() && gpuAvailable(); }
-export function setGpu(on) { on ? localStorage.removeItem(GPU_PREF) : localStorage.setItem(GPU_PREF, 'off'); }
+export function setGpu(on) {
+  on ? localStorage.removeItem(GPU_PREF) : localStorage.setItem(GPU_PREF, 'off');
+  localStorage.removeItem(GPU_REASON);
+}
+
+// Accuracy check: some phone GPUs run the model without errors but return wrong numbers (wrong
+// outlines). Run it on a fixed pattern and compare with reference numbers computed on a CPU
+// (tools/make_gpu_check.py). Relative error: ~0.001 expected on a working GPU, the int8 CPU model
+// gives 0.045, wrong results 0.14 and more.
+const GPU_MAX_ERROR = 0.06;
+
+function testPattern() { // same formula as tools/make_gpu_check.py
+  const data = new Float32Array(3 * 1024 * 1024);
+  for (let c = 0; c < 3; c++) for (let y = 0; y < 1024; y++) for (let x = 0; x < 1024; x++) {
+    data[c * 1048576 + y * 1024 + x] = 1.5 * Math.sin(0.07 * x + 1.3 * c) * Math.cos(0.05 * y) + 0.6 * Math.sin(0.013 * (x + 2 * y) + c);
+  }
+  return data;
+}
+
+export async function checkGpu(ort, session) { // exported for tests
+  const [{ pool, summary: ref }, out] = await Promise.all([
+    fetch('gpu-check.json').then(r => r.json()),
+    run(session, { pixel_values: new ort.Tensor('float32', testPattern(), [1, 3, 1024, 1024]) }, { priority: 1 }),
+  ]);
+  const emb = await out.image_embeddings.getData(), n = 64 / pool;
+  let diff = 0, norm = 0;
+  for (let ch = 0; ch < 256; ch++) for (let by = 0; by < n; by++) for (let bx = 0; bx < n; bx++) {
+    let sum = 0;
+    for (let y = by * pool; y < (by + 1) * pool; y++) for (let x = bx * pool; x < (bx + 1) * pool; x++) sum += emb[ch * 4096 + y * 64 + x];
+    const v = sum / (pool * pool), r = ref[(ch * n + by) * n + bx];
+    diff += (v - r) ** 2;
+    norm += r * r;
+  }
+  const error = Math.sqrt(diff / norm);
+  if (!(error < GPU_MAX_ERROR)) throw new Error(`the graphics chip's results were inaccurate (error ${error.toFixed(2)})`);
+  console.info(`WebGPU accuracy check passed (error ${error.toFixed(4)})`);
+}
 export const isEncoderOnGpu = () => encoderOnGpu;
 
 // The encoder failed on the graphics chip: remember it and use the processor from now on.
-export function gpuFailed(err) {
+function markGpuFailed(err) {
   console.warn('WebGPU encoder failed, using the processor', err);
   localStorage.setItem(GPU_PREF, 'failed');
-  delete sessions.samEncoder;
+  localStorage.setItem(GPU_REASON, err?.message ?? String(err));
   encoderOnGpu = false;
+}
+export function gpuFailed(err) { // during a run: also drop the GPU session so the next one is on the processor
+  markGpuFailed(err);
+  delete sessions.samEncoder;
 }
 
 export function getOrt() {
@@ -132,9 +174,10 @@ async function encoderSession() {
   if (await useGpu()) {
     try {
       const s = await createSession(MODELS.samEncoderFull, ['webgpu']);
+      await checkGpu(await getOrt(), s); // also compiles the shaders, so the first photo is quick
       encoderOnGpu = true;
       return s;
-    } catch (err) { gpuFailed(err); }
+    } catch (err) { markGpuFailed(err); }
   }
   // processor: the int8 model if we have it, else the full one (same speed on the processor)
   const model = (await cache.match(MODELS.samEncoder.url)) ? MODELS.samEncoder : MODELS.samEncoderFull;
@@ -151,18 +194,9 @@ export function getSession(name) {
 }
 
 // Creates the sessions ahead of time (e.g. while the photo picker is open) so the first photo is fast.
-// On the graphics chip, one dummy run also compiles its shaders.
-let gpuWarmed = false;
 export async function warmUp() {
   if (!(await modelsDownloaded().catch(() => false))) return;
   for (const name of ['samDecoder', 'samEncoder', 'clip']) await getSession(name).catch(() => {});
-  if (encoderOnGpu && !gpuWarmed) {
-    gpuWarmed = true;
-    try {
-      const [ort, s] = await Promise.all([getOrt(), getSession('samEncoder')]);
-      await run(s, { pixel_values: new ort.Tensor('float32', new Float32Array(3 * 1024 * 1024), [1, 3, 1024, 1024]) }, { priority: -1 });
-    } catch (err) { gpuFailed(err); }
-  }
 }
 
 // Human-readable "where does the AI run" for Settings.
