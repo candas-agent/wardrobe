@@ -59,7 +59,7 @@ function testPattern() { // same formula as tools/make_gpu_check.py
   return data;
 }
 
-export async function checkGpu(ort, session) { // exported for tests
+export async function checkGpu(ort, session) { // exported for tests; returns the relative error
   const [{ pool, summary: ref }, out] = await Promise.all([
     fetch('gpu-check.json').then(r => r.json()),
     run(session, { pixel_values: new ort.Tensor('float32', testPattern(), [1, 3, 1024, 1024]) }, { priority: 1 }),
@@ -73,9 +73,48 @@ export async function checkGpu(ort, session) { // exported for tests
     diff += (v - r) ** 2;
     norm += r * r;
   }
-  const error = Math.sqrt(diff / norm);
-  if (!(error < GPU_MAX_ERROR)) throw new Error(`the graphics chip's results were inaccurate (error ${error.toFixed(2)})`);
-  console.info(`WebGPU accuracy check passed (error ${error.toFixed(4)})`);
+  return Math.sqrt(diff / norm); // relative error, NaN if the GPU returned NaNs
+}
+
+// Ways to run the encoder on the GPU, safest last. Fused operations (graph optimisation) are the
+// usual cause of wrong results on mobile GPUs; the last one also avoids the NHWC layout conversion.
+const GPU_CONFIGS = [
+  { name: 'normal', providers: ['webgpu'], options: {} },
+  { name: 'basic', providers: ['webgpu'], options: { graphOptimizationLevel: 'basic' } },
+  { name: 'safe', providers: [{ name: 'webgpu', preferredLayout: 'NCHW' }], options: { graphOptimizationLevel: 'disabled' } },
+];
+const GPU_CONFIG = 'wardrobe-gpu-config'; // localStorage: name of the config that passed last time
+
+async function gpuName() {
+  const info = (await navigator.gpu?.requestAdapter().catch(() => null))?.info;
+  return [info?.vendor, info?.architecture, info?.description].filter(Boolean).join(' ') || 'unknown GPU';
+}
+
+// Tries the configs (last good one first) until one passes the accuracy check.
+async function gpuEncoderSession() {
+  const ort = await getOrt();
+  const last = localStorage.getItem(GPU_CONFIG);
+  const order = [...GPU_CONFIGS].sort((a, b) => (b.name === last) - (a.name === last));
+  const results = [];
+  for (const cfg of order) {
+    let s;
+    try {
+      s = await createSession(MODELS.samEncoderFull, cfg.providers, cfg.options);
+      const error = await checkGpu(ort, s); // also compiles the shaders, so the first photo is quick
+      results.push(`${cfg.name} ${Number.isFinite(error) ? error.toFixed(2) : 'NaN'}`);
+      if (error < GPU_MAX_ERROR) {
+        console.info(`WebGPU encoder: ${cfg.name} config passed the accuracy check (error ${error.toFixed(4)})`);
+        localStorage.setItem(GPU_CONFIG, cfg.name);
+        localStorage.setItem(GPU_REASON, `${await gpuName()}; check: ${results.join(', ')}`);
+        return s;
+      }
+    } catch (err) {
+      results.push(`${cfg.name} failed (${err.message?.slice(0, 60)})`);
+    }
+    await s?.release?.().catch(() => {});
+  }
+  localStorage.removeItem(GPU_CONFIG);
+  throw new Error(`the graphics chip's results were inaccurate (${await gpuName()}; check: ${results.join(', ')})`);
 }
 export const isEncoderOnGpu = () => encoderOnGpu;
 
@@ -162,19 +201,18 @@ export function ensureModels(onProgress) {
 
 // ---- sessions
 
-async function createSession(model, executionProviders) {
+async function createSession(model, executionProviders, options = {}) {
   const [ort, cache] = await Promise.all([getOrt(), caches.open(CACHE)]);
   const res = await cache.match(model.url);
   if (!res) throw new Error('Models not downloaded');
-  return ort.InferenceSession.create(new Uint8Array(await res.arrayBuffer()), { executionProviders });
+  return ort.InferenceSession.create(new Uint8Array(await res.arrayBuffer()), { executionProviders, ...options });
 }
 
 async function encoderSession() {
   const cache = await caches.open(CACHE);
   if (await useGpu()) {
     try {
-      const s = await createSession(MODELS.samEncoderFull, ['webgpu']);
-      await checkGpu(await getOrt(), s); // also compiles the shaders, so the first photo is quick
+      const s = await gpuEncoderSession();
       encoderOnGpu = true;
       return s;
     } catch (err) { markGpuFailed(err); }
