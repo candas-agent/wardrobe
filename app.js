@@ -282,13 +282,45 @@ async function addNext() {
     addNext();
   });
 
-  // a tap selects the item under it (replacing any previous selection); tapping the dot again clears it
-  stage.addEventListener('click', e => {
+  // A tap selects the item under it (replacing any previous selection). Holding adds another part
+  // to the selection, e.g. the other side of an open jacket: all points go to the model together,
+  // which outlines the whole item better than joining separate outlines. Tapping a dot removes it.
+  const toPhoto = e => {
     const r = stage.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width * work.width, y = (e.clientY - r.top) / r.height * work.height;
-    const [p] = draft.points;
-    if (p && Math.hypot(p.x - x, p.y - y) < dotRadius(stage) * 1.8) return resetSelection(draft, form, cls);
-    draft.points = [{ x, y, include: true }];
+    return { x: (e.clientX - r.left) / r.width * work.width, y: (e.clientY - r.top) / r.height * work.height };
+  };
+  let hold = null, held = false;
+  const cancelHold = () => { clearTimeout(hold?.timer); hold = null; };
+  stage.addEventListener('pointerdown', e => {
+    if (!e.isPrimary) return;
+    held = false;
+    const at = toPhoto(e);
+    hold = { cx: e.clientX, cy: e.clientY, timer: setTimeout(() => {
+      hold = null;
+      held = true;
+      if (!draft.points.length || hitDot(draft, stage, at) >= 0) return; // nothing to add to: the click handles it
+      navigator.vibrate?.(30);
+      draft.points = [...draft.points, { ...at, include: true }];
+      runSegment(draft, form);
+    }, HOLD_MS) };
+  });
+  stage.addEventListener('pointermove', e => {
+    if (hold && Math.hypot(e.clientX - hold.cx, e.clientY - hold.cy) > 12) cancelHold(); // scrolling, not holding
+  });
+  stage.addEventListener('pointerup', cancelHold);
+  stage.addEventListener('pointercancel', cancelHold);
+  stage.addEventListener('contextmenu', e => e.preventDefault()); // the long-press menu would get in the way
+  stage.addEventListener('click', e => {
+    if (held && draft.points.length) { held = false; return; } // the hold already added a point
+    held = false;
+    const at = toPhoto(e);
+    const hit = hitDot(draft, stage, at);
+    if (hit >= 0) {
+      if (draft.points.length === 1) return resetSelection(draft, form, cls);
+      draft.points = draft.points.filter((_, i) => i !== hit);
+    } else {
+      draft.points = [{ ...at, include: true }];
+    }
     runSegment(draft, form);
   });
 
@@ -307,6 +339,9 @@ function resetSelection(draft, form, cls) {
 }
 
 const dotRadius = stage => Math.max(8, stage.width / 70);
+const HOLD_MS = 450;
+// index of the selection dot under a tap, or -1
+const hitDot = (draft, stage, at) => draft.points.findIndex(p => Math.hypot(p.x - at.x, p.y - at.y) < dotRadius(stage) * 1.8);
 
 const seg = () => import('./segment.js');
 
@@ -353,7 +388,9 @@ async function runSegment(draft, form) {
     if (draft !== currentDraft || points !== draft.points) return; // a newer tap replaced this one
     draft.masks = res.masks;
     draft.maskIdx = res.best;
-    status.textContent = 'Pick the best outline below. Tap elsewhere to choose another item, or the dot to undo.';
+    status.textContent = points.length > 1
+      ? 'Pick the best outline below. Hold to add more, tap a dot to remove it.'
+      : 'Pick the best outline below. Item in several parts (like an open jacket)? Hold on the other part to add it.';
     renderCands(draft, form);
     applyMask(draft, form);
   } catch (err) {

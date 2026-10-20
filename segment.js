@@ -47,14 +47,19 @@ export async function segment(enc, points) {
   const scores = out.scores.data, masks = out.masks.data, count = out.masks.dims[1];
   const n = 256 * 256;
   const low = [...Array(count).keys()].map(k => masks.subarray(k * n, (k + 1) * n));
-  // drop near-duplicates (the model often returns two practically identical outlines), keep the higher score
+  // With one point the outline is ambiguous (pocket, jacket, whole person?): suggest the best score.
+  // With several points output 0 is the model's single answer meant for clear prompts; the others
+  // tend to grab neighbours (e.g. the trousers under an open jacket).
+  const rank = [...low.keys()].sort((a, b) => scores[b] - scores[a]);
+  if (points.length > 1) rank.unshift(...rank.splice(rank.indexOf(0), 1));
+  // drop near-duplicates (the model often returns two practically identical outlines), keep the better ranked
   const keep = [];
-  for (const k of [...low.keys()].sort((a, b) => scores[b] - scores[a])) {
+  for (const k of rank) {
     if (!keep.some(j => overlap(low[j], low[k]) > 0.95)) keep.push(k);
   }
   const cands = keep.map(k => ({ ...toMask(enc, low[k]), score: scores[k] }));
   const order = [...cands.keys()].sort((a, b) => cands[a].area - cands[b].area);
-  return { masks: order.map(i => cands[i]), best: order.indexOf(0) }; // keep[0] is the best score
+  return { masks: order.map(i => cands[i]), best: order.indexOf(0) }; // keep[0] is the suggestion
 }
 
 // intersection over union of two low-res masks (logit > 0)

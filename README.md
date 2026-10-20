@@ -6,7 +6,9 @@ Everything is stored on the device (IndexedDB) — no account, no server.
 - **Add** — the **+ Add** button on the Wardrobe tab opens the phone's picker (camera or gallery,
   several photos at once). If there are several items or a busy
   background, **tap the item**: it's cut out (pick one of 3 outlines; tap elsewhere to choose
-  another item, tap the dot to undo) and tagging runs on the cut-out only. The app suggests the **type**
+  another item, tap the dot to undo). Item in several parts, like an open jacket? **Hold** on the
+  other part to add it: all points go to the model together, which outlines the whole item.
+  Tagging runs on the cut-out only. The app suggests the **type**
   (top-3 chips) and **colour** (dominant + secondary); correct with one tap.
   Cut-out items are stored on white; the original photo is kept too.
   If the photo is already in your wardrobe (same file, or the same picture re-saved/resized),
@@ -51,7 +53,7 @@ Best results: one item, laid flat or on a hanger, plain background, good light.
 | `catalog.js` | type groups + colour palette |
 | `models.js` | model download/cache, onnxruntime sessions |
 | `classify.js` | CLIP type detection + colour extraction |
-| `segment.js` | SlimSAM tap-to-select, cut-outs |
+| `segment.js` | EdgeSAM tap-to-select, cut-outs |
 | `fingerprint.js` | photo fingerprints (SHA-256 + 16×16 colour thumbnail) for duplicate warnings |
 | `labels.json` | precomputed CLIP text embeddings (generated) |
 | `sw.js`, `manifest.webmanifest`, `icons/` | offline + installable |
