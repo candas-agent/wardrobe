@@ -931,12 +931,20 @@ async function settingsView() {
     </div>
     <div class="panel">
       <strong>AI helpers</strong>
-      <p class="muted">${hasModel ? `Type detection and tap-to-select are ready (${models.TOTAL_MB} MB, work offline).`
-        : 'Downloading (see the bar at the top)…'}</p>
+      <p class="muted">${hasModel ? `Type detection and tap-to-select are ready (${await models.totalMB()} MB, work offline).`
+        : 'Downloading (see the bar at the top)…'}<br>Running on: ${await models.backendLabel()}</p>
+      ${await models.gpuAvailable() ? `<label class="row"><input type="checkbox" id="gpu"${models.gpuState() ? '' : ' checked'}>
+        <span class="grow">Use the graphics chip for tap-to-select</span></label>
+        ${models.gpuState() === 'failed' ? '<p class="muted small">It was switched off because it failed on this phone. Tick it to try again.</p>' : ''}`
+        : '<p class="muted small">This browser has no graphics chip access (WebGPU), so the processor is used.</p>'}
     </div>
     </div>
     <p class="muted" style="font-size:.8rem">Type detection: OpenAI CLIP ViT-B/32. Tap-to-select: SlimSAM (Segment Anything). Both run on-device via onnxruntime-web.</p>`;
 
+  $('#gpu')?.addEventListener('change', e => {
+    models.setGpu(e.target.checked);
+    location.reload(); // the AI engine is set up once per launch
+  });
   $('#exp').addEventListener('click', async () => {
     $('#bstatus').textContent = 'Preparing…';
     try { await exportBackup(); $('#bstatus').textContent = ''; }
@@ -993,12 +1001,13 @@ async function prepareModels() {
   document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); // sticky item bar sits below it
   retry.hidden = true;
   prog.hidden = false;
-  text.textContent = `Preparing AI helpers (one-time, ${models.TOTAL_MB} MB)…`;
+  const mb = await models.missingMB();
+  text.textContent = `Preparing AI helpers (one-time, ${mb} MB)…`;
   retry.onclick = prepareModels;
   try {
     await models.ensureModels(p => {
       prog.value = p;
-      text.textContent = `Preparing AI helpers (one-time, ${models.TOTAL_MB} MB)… ${Math.round(p * 100)}%`;
+      text.textContent = `Preparing AI helpers (one-time, ${mb} MB)… ${Math.round(p * 100)}%`;
     });
     bar.hidden = true;
     document.body.classList.remove('downloading');

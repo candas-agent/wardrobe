@@ -1,7 +1,7 @@
 // Tap-to-select: SlimSAM (Segment Anything) turns tapped points into an outline of the item.
 // encode() runs the heavy image encoder once per photo; segment() is cheap and runs on every tap.
 
-import { getOrt, getSession, run } from './models.js';
+import { getOrt, getSession, run, isEncoderOnGpu, gpuFailed } from './models.js';
 
 const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
@@ -21,7 +21,15 @@ export async function encode(source) {
       for (let c = 0; c < 3; c++) data[c * 1024 * 1024 + o] = (px[i + c] / 255 - MEAN[c]) / STD[c];
     }
   }
-  const out = await run(session, { pixel_values: new ort.Tensor('float32', data, [1, 3, 1024, 1024]) }); // same priority as type detection, first come first served
+  const feeds = { pixel_values: new ort.Tensor('float32', data, [1, 3, 1024, 1024]) };
+  let out;
+  try {
+    out = await run(session, feeds); // same priority as type detection, first come first served
+  } catch (err) {
+    if (!isEncoderOnGpu()) throw err;
+    gpuFailed(err); // didn't work on this graphics chip: redo it on the processor
+    out = await run(await getSession('samEncoder'), feeds);
+  }
   return { W, H, s, nw, nh, emb: out.image_embeddings, pos: out.image_positional_embeddings };
 }
 

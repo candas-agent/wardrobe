@@ -1,4 +1,6 @@
-// On-device models: download once into the Cache API, then run with onnxruntime-web (wasm).
+// On-device models: download once into the Cache API, then run with onnxruntime-web.
+// The heavy SAM image encoder runs on the graphics chip (WebGPU) when the device has one, else on
+// the processor (wasm, multi-threaded when possible). Everything else always runs on the processor.
 
 const ORT_VERSION = '1.20.1';
 const ORT_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
@@ -10,12 +12,14 @@ const SAM = `${HF}Xenova/slimsam-77-uniform/resolve/5850ab45f587c112167512ffef94
 const MODELS = {
   clip: { url: CLIP + 'vision_model_quantized.onnx', size: 89117001 },
   samEncoder: { url: SAM + 'vision_encoder_quantized.onnx', size: 8882165 },
+  // full precision for the graphics chip: the int8 model's integer ops would fall back to the processor
+  samEncoderFull: { url: SAM + 'vision_encoder.onnx', size: 23276014 },
   samDecoder: { url: SAM + 'prompt_encoder_mask_decoder_quantized.onnx', size: 4903810 },
 };
-export const TOTAL_MB = Math.round(Object.values(MODELS).reduce((s, m) => s + m.size, 0) / 1e6);
 
 let ortPromise;
 const sessions = {};
+let encoderOnGpu = false;
 
 // With the service worker in control, onnxruntime is loaded through it from ./ort/ (cached, works
 // offline); when it has also made the page cross-origin isolated, several threads can be used.
@@ -24,9 +28,31 @@ const VIA_SW = !!navigator.serviceWorker?.controller;
 export const THREADS = VIA_SW && self.crossOriginIsolated
   ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
 
+// ---- graphics chip
+
+const GPU_PREF = 'wardrobe-gpu'; // localStorage: 'off' (switched off in Settings) | 'failed' (didn't work here)
+let gpuAvailablePromise;
+export function gpuAvailable() {
+  gpuAvailablePromise ??= (async () => !!(await navigator.gpu?.requestAdapter().catch(() => null)))();
+  return gpuAvailablePromise;
+}
+export const gpuState = () => localStorage.getItem(GPU_PREF);
+export async function useGpu() { return !gpuState() && gpuAvailable(); }
+export function setGpu(on) { on ? localStorage.removeItem(GPU_PREF) : localStorage.setItem(GPU_PREF, 'off'); }
+export const isEncoderOnGpu = () => encoderOnGpu;
+
+// The encoder failed on the graphics chip: remember it and use the processor from now on.
+export function gpuFailed(err) {
+  console.warn('WebGPU encoder failed, using the processor', err);
+  localStorage.setItem(GPU_PREF, 'failed');
+  delete sessions.samEncoder;
+  encoderOnGpu = false;
+}
+
 export function getOrt() {
-  const base = VIA_SW ? new URL('ort/', location.href).href : ORT_BASE;
-  ortPromise ??= import(`${base}ort.min.mjs`).then(ort => {
+  ortPromise ??= useGpu().then(async gpu => {
+    const base = VIA_SW ? new URL('ort/', location.href).href : ORT_BASE;
+    const ort = await import(`${base}${gpu ? 'ort.webgpu.min.mjs' : 'ort.min.mjs'}`);
     ort.env.wasm.wasmPaths = base;
     ort.env.wasm.numThreads = THREADS;
     return ort;
@@ -34,10 +60,27 @@ export function getOrt() {
   return ortPromise;
 }
 
+// ---- download
+
+async function required() {
+  return ['clip', (await useGpu()) ? 'samEncoderFull' : 'samEncoder', 'samDecoder'].map(k => MODELS[k]);
+}
+
 export async function modelsDownloaded() {
   const cache = await caches.open(CACHE);
-  const hits = await Promise.all(Object.values(MODELS).map(m => cache.match(m.url)));
+  const hits = await Promise.all((await required()).map(m => cache.match(m.url)));
   return hits.every(Boolean);
+}
+
+// MB still to download (what the progress bar shows), and MB of everything this device uses.
+export async function missingMB() {
+  const cache = await caches.open(CACHE);
+  let bytes = 0;
+  for (const m of await required()) if (!(await cache.match(m.url))) bytes += m.size;
+  return Math.round(bytes / 1e6);
+}
+export async function totalMB() {
+  return Math.round((await required()).reduce((s, m) => s + m.size, 0) / 1e6);
 }
 
 async function fetchInto(cache, model, onBytes) {
@@ -54,16 +97,14 @@ async function fetchInto(cache, model, onBytes) {
   await cache.put(model.url, new Response(new Blob(chunks), { headers: { 'content-type': 'application/octet-stream' } }));
 }
 
-// Downloads whatever isn't cached yet. onProgress gets 0..1 over all models.
+// Downloads whatever isn't cached yet. onProgress gets 0..1 over what's missing.
 async function downloadModels(onProgress) {
   const cache = await caches.open(CACHE);
-  const all = Object.values(MODELS);
-  const total = all.reduce((s, m) => s + m.size, 0);
+  const missing = [];
+  for (const m of await required()) if (!(await cache.match(m.url))) missing.push(m);
+  const total = missing.reduce((s, m) => s + m.size, 0);
   let done = 0;
-  for (const m of all) {
-    if (await cache.match(m.url)) { done += m.size; continue; }
-    await fetchInto(cache, m, n => { done += n; onProgress?.(Math.min(1, done / total)); });
-  }
+  for (const m of missing) await fetchInto(cache, m, n => { done += n; onProgress?.(Math.min(1, done / total)); });
   onProgress?.(1);
 }
 
@@ -77,28 +118,63 @@ export function ensureModels(onProgress) {
   return readyPromise;
 }
 
+// ---- sessions
+
+async function createSession(model, executionProviders) {
+  const [ort, cache] = await Promise.all([getOrt(), caches.open(CACHE)]);
+  const res = await cache.match(model.url);
+  if (!res) throw new Error('Models not downloaded');
+  return ort.InferenceSession.create(new Uint8Array(await res.arrayBuffer()), { executionProviders });
+}
+
+async function encoderSession() {
+  const cache = await caches.open(CACHE);
+  if (await useGpu()) {
+    try {
+      const s = await createSession(MODELS.samEncoderFull, ['webgpu']);
+      encoderOnGpu = true;
+      return s;
+    } catch (err) { gpuFailed(err); }
+  }
+  // processor: the int8 model if we have it, else the full one (same speed on the processor)
+  const model = (await cache.match(MODELS.samEncoder.url)) ? MODELS.samEncoder : MODELS.samEncoderFull;
+  return createSession(model, ['wasm']);
+}
+
 export function getSession(name) {
   sessions[name] ??= (async () => {
     await ensureModels(); // waits for an ongoing download
-    const [ort, cache] = await Promise.all([getOrt(), caches.open(CACHE)]);
-    const res = await cache.match(MODELS[name].url);
-    if (!res) throw new Error('Models not downloaded');
-    const session = await ort.InferenceSession.create(new Uint8Array(await res.arrayBuffer()), { executionProviders: ['wasm'] });
-    return session;
+    return name === 'samEncoder' ? encoderSession() : createSession(MODELS[name], ['wasm']);
   })();
   sessions[name].catch(() => { delete sessions[name]; });
   return sessions[name];
 }
 
 // Creates the sessions ahead of time (e.g. while the photo picker is open) so the first photo is fast.
+// On the graphics chip, one dummy run also compiles its shaders.
+let gpuWarmed = false;
 export async function warmUp() {
   if (!(await modelsDownloaded().catch(() => false))) return;
   for (const name of ['samDecoder', 'samEncoder', 'clip']) await getSession(name).catch(() => {});
+  if (encoderOnGpu && !gpuWarmed) {
+    gpuWarmed = true;
+    try {
+      const [ort, s] = await Promise.all([getOrt(), getSession('samEncoder')]);
+      await run(s, { pixel_values: new ort.Tensor('float32', new Float32Array(3 * 1024 * 1024), [1, 3, 1024, 1024]) }, { priority: -1 });
+    } catch (err) { gpuFailed(err); }
+  }
 }
 
-// The wasm backend runs one inference at a time. Jobs wait in a queue; higher priority goes first
-// (a tap's outline before type detection), and a job whose result is no longer wanted (stale()) is
-// dropped before it starts.
+// Human-readable "where does the AI run" for Settings.
+export async function backendLabel() {
+  if (await useGpu()) return 'graphics chip (WebGPU)';
+  return `processor (${THREADS} core${THREADS > 1 ? 's' : ''})`;
+}
+
+// ---- job queue
+
+// Inference runs one job at a time. Jobs wait in a queue; higher priority goes first (a tap's outline
+// before type detection), and a job whose result is no longer wanted (stale()) is dropped before it starts.
 export class StaleError extends Error {}
 const pending = [];
 let running = false;
