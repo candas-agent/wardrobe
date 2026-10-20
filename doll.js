@@ -76,7 +76,7 @@ export async function itemArt(item) {
   art.getContext('2d').drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
   const data = art.getContext('2d').getImageData(0, 0, box.w, box.h);
   return { blob: await art.convertToBlob({ type: 'image/png' }), w: box.w, h: box.h, alpha: (x, y) => data.data[(y * box.w + x) * 4 + 3],
-    rowWidth: f => rowWidth(data, f) };
+    rowWidth: f => rowWidth(data, f), parts: parts(data) };
 }
 
 function whiteToClear(img) {
@@ -107,6 +107,32 @@ function opaqueBox(img) {
   return x1 < 0 ? { x: 0, y: 0, w, h } : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
+// Number of separate big shapes (a photo of a pair of shoes has two, a single shoe one).
+function parts(img) {
+  const k = Math.max(1, Math.ceil(Math.max(img.width, img.height) / 120)); // count on a ~120 px grid
+  const w = Math.ceil(img.width / k), h = Math.ceil(img.height / k), on = new Uint8Array(w * h);
+  for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) {
+    if (img.data[(y * img.width + x) * 4 + 3] > 128) on[Math.floor(y / k) * w + Math.floor(x / k)] = 1;
+  }
+  const label = new Int32Array(w * h), sizes = [];
+  for (let start = 0; start < w * h; start++) {
+    if (!on[start] || label[start]) continue;
+    let n = 0;
+    const stack = [start];
+    label[start] = sizes.length + 1;
+    while (stack.length) {
+      const i = stack.pop(), x = i % w;
+      n++;
+      for (const j of [x > 0 && i - 1, x < w - 1 && i + 1, i - w, i + w]) {
+        if (j !== false && j >= 0 && j < w * h && on[j] && !label[j]) { label[j] = sizes.length + 1; stack.push(j); }
+      }
+    }
+    sizes.push(n);
+  }
+  const big = Math.max(0, ...sizes);
+  return sizes.filter(n => n > big * 0.25).length; // ignore specks and laces
+}
+
 // opaque width of the row at fraction f of the height (e.g. a top's shoulder line)
 function rowWidth(img, f) {
   const { width: w, height: h, data } = img, y = Math.min(h - 1, Math.floor(f * h));
@@ -127,7 +153,12 @@ function autoPlace(b, art, layer, type) {
   };
   const byRow = (rowW, f) => rowW * art.w / art.rowWidth(f); // overall width that gives row f the width rowW
   if (layer === 'shoes') {
-    const w = b.sw * 0.5, h = w * art.h / art.w, bottom = b.ankleY + 0.12 * torso;
+    const bottom = b.ankleY + 0.12 * torso;
+    if (art.parts >= 2 || art.w > art.h * 2.1) { // a photo of the pair (apart, or touching: very wide): once, across both feet
+      const w = Math.abs(b.ankles[1].x - b.ankles[0].x) + b.sw * 0.55, h = w * art.h / art.w;
+      return [{ x: (b.ankles[0].x + b.ankles[1].x) / 2 - w / 2, y: bottom - h, w, h }];
+    }
+    const w = b.sw * 0.5, h = w * art.h / art.w; // a single shoe: on each foot, one of them mirrored
     return b.ankles.map((a, i) => ({ x: a.x - w / 2, y: bottom - h, w, h, mirror: i === 0 }));
   }
   if (layer === 'bottom' && ['trousers', 'jeans', 'leggings'].includes(type)) { // waist at the hips, hem at the ankles
