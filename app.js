@@ -4,6 +4,7 @@ import { GROUPS, PALETTE, colourById, loadTypes } from './catalog.js';
 const view = document.getElementById('view');
 import * as models from './models.js';
 import * as fp from './fingerprint.js';
+import { shrink, fit } from './imaging.js';
 
 const classifier = () => import('./classify.js'); // loaded lazily; onnxruntime itself loads on first use
 
@@ -68,11 +69,12 @@ function onChips(name, cb) {
   });
 }
 
-async function resizeToBlob(bmp, max, quality) {
-  const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
-  const c = new OffscreenCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
-  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return c.convertToBlob({ type: 'image/jpeg', quality });
+async function resizeToBlob(source, max, quality) {
+  const c = fit(source, max);
+  if (c instanceof OffscreenCanvas) return c.convertToBlob({ type: 'image/jpeg', quality });
+  const copy = new OffscreenCanvas(c.width, c.height); // an ImageBitmap that's already small enough
+  copy.getContext('2d').drawImage(c, 0, 0);
+  return copy.convertToBlob({ type: 'image/jpeg', quality });
 }
 
 // ---------- wardrobe ----------
@@ -240,12 +242,11 @@ async function addNext() {
     return addNext();
   }
   // working copy at storage resolution; segmentation and the cut-out are done on this
-  const s = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
-  const work = new OffscreenCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
-  work.getContext('2d').drawImage(bmp, 0, 0, work.width, work.height);
+  let work = fit(bmp, 1280); // step-by-step: a single big shrink adds false patterns to fine fabrics
+  if (work === bmp) { work = new OffscreenCanvas(bmp.width, bmp.height); work.getContext('2d').drawImage(bmp, 0, 0); }
   bmp.close();
   const [photo, thumb, sha256, items] = await Promise.all([
-    resizeToBlob(work, 1280, 0.85), resizeToBlob(work, 400, 0.8), fp.sha256(file), db.getAll('items')]);
+    resizeToBlob(work, 1280, 0.92), resizeToBlob(work, 400, 0.85), fp.sha256(file), db.getAll('items')]);
   const source = { sha256, tiny: fp.tiny(work), name: file.name, size: file.size };
   const dupes = findDupes(items, source);
   const draft = {
@@ -273,7 +274,7 @@ async function addNext() {
     if (draft.cut) {
       const flat = seg().then(m => m.onWhite(draft.cut));
       draft.original = draft.photo;
-      [draft.photo, draft.thumb] = await Promise.all([resizeToBlob(await flat, 1280, 0.85), resizeToBlob(await flat, 400, 0.8)]);
+      [draft.photo, draft.thumb] = await Promise.all([resizeToBlob(await flat, 1280, 0.92), resizeToBlob(await flat, 400, 0.85)]);
     }
     await db.put('items', toItem(draft));
     navigator.storage?.persist?.(); // ask the browser not to evict our data
@@ -369,13 +370,13 @@ async function renderCands(draft, form) {
   draft.masks.forEach((mask, i) => {
     const b = document.createElement('button');
     b.className = 'cand' + (i === draft.maskIdx ? ' on' : '');
-    b.setAttribute('aria-label', ['Smaller', 'Medium', 'Larger'][i] + ' outline');
+    b.setAttribute('aria-label', `Outline ${i + 1} of ${draft.masks.length}`);
     const c = document.createElement('canvas');
     if (mask.bbox) {
-      const cut = m.cutout(draft.work, mask), k = 160 / Math.max(cut.width, cut.height);
-      c.width = Math.max(1, Math.round(cut.width * k));
-      c.height = Math.max(1, Math.round(cut.height * k));
-      c.getContext('2d').drawImage(cut, 0, 0, c.width, c.height);
+      const small = fit(m.cutout(draft.work, mask), 160);
+      c.width = small.width;
+      c.height = small.height;
+      c.getContext('2d').drawImage(small, 0, 0);
     }
     b.append(c);
     b.addEventListener('click', () => {
@@ -933,11 +934,12 @@ async function settingsView() {
       <strong>AI helpers</strong>
       <p class="muted">${hasModel ? `Type detection and tap-to-select are ready (${await models.totalMB()} MB, work offline).`
         : 'Downloading (see the bar at the top)…'}<br>Running on: ${await models.backendLabel()}</p>
-      ${await models.gpuAvailable() ? `<label class="row"><input type="checkbox" id="gpu"${models.gpuState() ? '' : ' checked'}>
-        <span class="grow">Use the graphics chip for tap-to-select</span></label>
-        ${models.gpuState() === 'failed' ? `<p class="muted small">Switched off automatically on this phone: ${esc(models.gpuFailReason() ?? 'it failed')}.
-          Tick it to try again.</p>`
-          : models.gpuFailReason() && !models.gpuState() ? `<p class="muted small">${esc(models.gpuFailReason())}</p>` : ''}`
+      ${await models.gpuAvailable() ? `<label class="row"><input type="checkbox" id="gpu"${models.gpuState() === 'on' ? ' checked' : ''}>
+        <span class="grow">Use the graphics chip for tap-to-select (experimental)</span></label>
+        <p class="muted small">Can be faster, but on some phones it gives wrong outlines or even freezes the phone
+        while it's being checked. If that happens, restart the phone and switch this off.</p>
+        ${models.gpuState() === 'failed' ? `<p class="muted small">Switched off automatically on this phone: ${esc(models.gpuFailReason() ?? 'it failed')}.</p>`
+          : models.gpuFailReason() && models.gpuState() === 'on' ? `<p class="muted small">${esc(models.gpuFailReason())}</p>` : ''}`
         : '<p class="muted small">This browser has no graphics chip access (WebGPU), so the processor is used.</p>'}
     </div>
     </div>

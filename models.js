@@ -1,21 +1,23 @@
 // On-device models: download once into the Cache API, then run with onnxruntime-web.
-// The heavy SAM image encoder runs on the graphics chip (WebGPU) when the device has one, else on
-// the processor (wasm, multi-threaded when possible). Everything else always runs on the processor.
+// The heavy EdgeSAM image encoder runs on the processor (wasm, multi-threaded when possible). The
+// graphics chip (WebGPU) is an opt-in experiment: on an Android test phone it gave wrong outlines and
+// froze the phone while being checked, so it's never used unless switched on in Settings.
+// Everything else always runs on the processor.
 
 const ORT_VERSION = '1.20.1';
 const ORT_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 const CACHE = 'wardrobe-model-v1';
 const HF = 'https://huggingface.co/';
 const CLIP = `${HF}Xenova/clip-vit-base-patch32/resolve/d15189d7028b43f1d3e65039190477f6af591c2a/onnx/`;
-const SAM = `${HF}Xenova/slimsam-77-uniform/resolve/5850ab45f587c112167512ffef949107115e26a0/onnx/`;
+const EDGESAM = `${HF}chongzhou/EdgeSAM/resolve/e0564124628944e1622973d4e0f68158b46f035a/`;
 
 const MODELS = {
   clip: { url: CLIP + 'vision_model_quantized.onnx', size: 89117001 },
-  samEncoder: { url: SAM + 'vision_encoder_quantized.onnx', size: 8882165 },
-  // full precision for the graphics chip: the int8 model's integer ops would fall back to the processor
-  samEncoderFull: { url: SAM + 'vision_encoder.onnx', size: 23276014 },
-  samDecoder: { url: SAM + 'prompt_encoder_mask_decoder_quantized.onnx', size: 4903810 },
+  samEncoder: { url: EDGESAM + 'edge_sam_3x_encoder.onnx', size: 22098300 }, // same file on processor and graphics chip
+  samDecoder: { url: EDGESAM + 'edge_sam_3x_decoder.onnx', size: 15937006 },
 };
+
+const MODELS_ENCODER_ID = 'edgesam-3x';
 
 let ortPromise;
 const sessions = {};
@@ -30,7 +32,7 @@ export const THREADS = VIA_SW && self.crossOriginIsolated
 
 // ---- graphics chip
 
-const GPU_PREF = 'wardrobe-gpu'; // localStorage: 'off' (switched off in Settings) | 'failed' (didn't work here)
+const GPU_PREF = 'wardrobe-gpu'; // localStorage: 'on' (switched on in Settings) | 'failed' (didn't work here); unset = off
 const GPU_REASON = 'wardrobe-gpu-reason';
 export const gpuFailReason = () => localStorage.getItem(GPU_REASON);
 let gpuAvailablePromise;
@@ -38,10 +40,15 @@ export function gpuAvailable() {
   gpuAvailablePromise ??= (async () => !!(await navigator.gpu?.requestAdapter().catch(() => null)))();
   return gpuAvailablePromise;
 }
+// Opt-in since EdgeSAM: earlier settings (on by default, or 'failed' for SlimSAM) are reset to off.
+if (localStorage.getItem('wardrobe-gpu-model') !== MODELS_ENCODER_ID) {
+  for (const k of [GPU_PREF, 'wardrobe-gpu-config', 'wardrobe-gpu-reason']) localStorage.removeItem(k);
+  localStorage.setItem('wardrobe-gpu-model', MODELS_ENCODER_ID);
+}
 export const gpuState = () => localStorage.getItem(GPU_PREF);
-export async function useGpu() { return !gpuState() && gpuAvailable(); }
+export async function useGpu() { return gpuState() === 'on' && gpuAvailable(); }
 export function setGpu(on) {
-  on ? localStorage.removeItem(GPU_PREF) : localStorage.setItem(GPU_PREF, 'off');
+  on ? localStorage.setItem(GPU_PREF, 'on') : localStorage.removeItem(GPU_PREF);
   localStorage.removeItem(GPU_REASON);
 }
 
@@ -62,7 +69,7 @@ function testPattern() { // same formula as tools/make_gpu_check.py
 export async function checkGpu(ort, session) { // exported for tests; returns the relative error
   const [{ pool, summary: ref }, out] = await Promise.all([
     fetch('gpu-check.json').then(r => r.json()),
-    run(session, { pixel_values: new ort.Tensor('float32', testPattern(), [1, 3, 1024, 1024]) }, { priority: 1 }),
+    run(session, { image: new ort.Tensor('float32', testPattern(), [1, 3, 1024, 1024]) }, { priority: 1 }),
   ]);
   const emb = await out.image_embeddings.getData(), n = 64 / pool;
   let diff = 0, norm = 0;
@@ -76,12 +83,10 @@ export async function checkGpu(ort, session) { // exported for tests; returns th
   return Math.sqrt(diff / norm); // relative error, NaN if the GPU returned NaNs
 }
 
-// Ways to run the encoder on the GPU, safest last. Fused operations (graph optimisation) are the
-// usual cause of wrong results on mobile GPUs; the last one also avoids the NHWC layout conversion.
+// Only the normal configuration: trying safer (unoptimised, much heavier) ones one after another
+// froze the Android test phone.
 const GPU_CONFIGS = [
   { name: 'normal', providers: ['webgpu'], options: {} },
-  { name: 'basic', providers: ['webgpu'], options: { graphOptimizationLevel: 'basic' } },
-  { name: 'safe', providers: [{ name: 'webgpu', preferredLayout: 'NCHW' }], options: { graphOptimizationLevel: 'disabled' } },
 ];
 const GPU_CONFIG = 'wardrobe-gpu-config'; // localStorage: name of the config that passed last time
 
@@ -99,7 +104,7 @@ async function gpuEncoderSession() {
   for (const cfg of order) {
     let s;
     try {
-      s = await createSession(MODELS.samEncoderFull, cfg.providers, cfg.options);
+      s = await createSession(MODELS.samEncoder, cfg.providers, cfg.options);
       const error = await checkGpu(ort, s); // also compiles the shaders, so the first photo is quick
       results.push(`${cfg.name} ${Number.isFinite(error) ? error.toFixed(2) : 'NaN'}`);
       if (error < GPU_MAX_ERROR) {
@@ -144,7 +149,13 @@ export function getOrt() {
 // ---- download
 
 async function required() {
-  return ['clip', (await useGpu()) ? 'samEncoderFull' : 'samEncoder', 'samDecoder'].map(k => MODELS[k]);
+  return Object.values(MODELS);
+}
+
+// Removes cached models the app no longer uses (e.g. SlimSAM, before EdgeSAM replaced it).
+async function pruneOldModels() {
+  const cache = await caches.open(CACHE), wanted = new Set(Object.values(MODELS).map(m => m.url));
+  for (const req of await cache.keys()) if (!wanted.has(req.url)) await cache.delete(req);
 }
 
 export async function modelsDownloaded() {
@@ -187,6 +198,7 @@ async function downloadModels(onProgress) {
   let done = 0;
   for (const m of missing) await fetchInto(cache, m, n => { done += n; onProgress?.(Math.min(1, done / total)); });
   onProgress?.(1);
+  await pruneOldModels().catch(() => {});
 }
 
 // Starts (or joins) the one-time download. Listeners get progress 0..1.
@@ -209,7 +221,6 @@ async function createSession(model, executionProviders, options = {}) {
 }
 
 async function encoderSession() {
-  const cache = await caches.open(CACHE);
   if (await useGpu()) {
     try {
       const s = await gpuEncoderSession();
@@ -217,9 +228,7 @@ async function encoderSession() {
       return s;
     } catch (err) { markGpuFailed(err); }
   }
-  // processor: the int8 model if we have it, else the full one (same speed on the processor)
-  const model = (await cache.match(MODELS.samEncoder.url)) ? MODELS.samEncoder : MODELS.samEncoderFull;
-  return createSession(model, ['wasm']);
+  return createSession(MODELS.samEncoder, ['wasm']);
 }
 
 export function getSession(name) {

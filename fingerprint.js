@@ -1,3 +1,5 @@
+import { shrink } from './imaging.js';
+
 // Photo fingerprints for duplicate warnings.
 // sha256: exact same file. tiny: the picture shrunk to 16x16 colour pixels, which survives
 // resizing/recompression (phones often re-encode gallery photos, so the bytes differ).
@@ -11,16 +13,7 @@ export async function sha256(blob) {
 
 // source: ImageBitmap or canvas. Returns 16x16 RGB as base64 (1 KB).
 export function tiny(source) {
-  // shrink in steps so each pixel averages its area instead of sampling stray pixels
-  let cur = source;
-  while (Math.max(cur.width, cur.height) > 64) {
-    const c = new OffscreenCanvas(Math.max(16, Math.round(cur.width / 2)), Math.max(16, Math.round(cur.height / 2)));
-    c.getContext('2d').drawImage(cur, 0, 0, c.width, c.height);
-    cur = c;
-  }
-  const ctx = new OffscreenCanvas(16, 16).getContext('2d');
-  ctx.drawImage(cur, 0, 0, 16, 16);
-  const px = ctx.getImageData(0, 0, 16, 16).data;
+  const px = shrink(source, 16, 16).getContext('2d').getImageData(0, 0, 16, 16).data;
   let bin = '';
   for (let i = 0; i < 256; i++) bin += String.fromCharCode(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
   return btoa(bin);

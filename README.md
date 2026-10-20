@@ -26,13 +26,16 @@ usable meanwhile and anything that needs them waits.
 
 ## How tagging works
 
-- **Tap-to-select:** SlimSAM-77 (`Xenova/slimsam-77-uniform`, int8, 14 MB), a distilled Segment
-  Anything model. The image encoder runs once per photo (in the background, right after it loads);
+- **Tap-to-select:** EdgeSAM-3x (`chongzhou/EdgeSAM`, 38 MB), a phone-sized Segment Anything.
+  Chosen over SlimSAM-77 / MobileSAM / EfficientSAM after measuring: ~3x faster than SlimSAM in the
+  browser with the same outline quality (45 test taps: mean IoU 0.966 best outline, 0.914 default).
+  Licence: S-Lab License 1.0 (non-commercial); MobileSAM (Apache-2.0) is the fallback option if that
+  ever matters. The image encoder runs once per photo (in the background, right after it loads);
   each tap only re-runs the small prompt decoder, so outlines appear in about a second.
 - **Type:** OpenAI CLIP ViT-B/32 vision model (`Xenova/clip-vit-base-patch32`, int8, 89 MB)
   runs on the phone via onnxruntime-web. Its image embedding is compared with text embeddings
   of the clothing types, precomputed into `labels.json` — so the phone never needs the text model.
-  Downloaded once (together with SlimSAM: 103 MB), cached, then offline.
+  Downloaded once (together with EdgeSAM: 127 MB), cached, then offline.
 - **Colour:** k-means in Lab over the item's pixels — the cut-out mask if you tapped, otherwise
   background estimated from the border pixels plus centre weighting — then the nearest named
   colour from the palette in `catalog.js`.
@@ -59,11 +62,13 @@ Best results: one item, laid flat or on a hanger, plain background, good light.
 The SAM image encoder is the heavy step (it prepares a photo for tapping). To make it bearable:
 - `sw.js` makes the app cross-origin isolated (adds COOP/COEP headers, serves onnxruntime
   same-origin under `./ort/`), so onnxruntime can use up to 4 threads — ~3.5x faster.
-- On devices with WebGPU the encoder runs on the graphics chip (full-precision model, 23 MB,
-  downloaded instead of the int8 one). Some phone GPUs run it without errors but return wrong
-  numbers, so at every launch it's checked on a fixed test pattern against reference numbers
-  (`gpu-check.json`, made by `tools/make_gpu_check.py`); if the check or a run fails it falls back
-  to the processor and remembers that (the reason is shown in Settings). Settings shows where it runs and can switch the graphics chip off.
+- Graphics chip (WebGPU) for the encoder: **opt-in experiment** in Settings. On an Android test
+  phone it gave wrong outlines (accuracy-check error 1.09) and froze the phone while trying
+  configurations. When switched on, the encoder is first checked on a fixed test pattern against
+  reference numbers (`gpu-check.json`, made by `tools/make_gpu_check.py`); failure falls back to
+  the processor and the reason is shown in Settings.
+- Photos are shrunk step by step (`imaging.js`): one big drawImage shrink turns fine fabric weaves
+  into false patterns (moiré). Settings shows where it runs and can switch the graphics chip off.
 - Model sessions are created while the photo picker is open (`models.warmUp()`).
 - One job queue (`models.run`): a tap's outline goes before queued type detection, and type
   detections that are no longer wanted are dropped before they start.

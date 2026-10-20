@@ -3,6 +3,7 @@
 
 import { PALETTE, loadTypes } from './catalog.js';
 import { getOrt, getSession, run } from './models.js';
+import { shrink } from './imaging.js';
 
 const MEAN = [0.48145466, 0.4578275, 0.40821073];
 const STD = [0.26862954, 0.26130258, 0.27577711];
@@ -14,8 +15,8 @@ function pixelValues(source) {
   const ctx = c.getContext('2d');
   ctx.fillStyle = '#fff'; // cut-outs are transparent: show them like a product photo
   ctx.fillRect(0, 0, 224, 224);
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(source, (224 - w * s) / 2, (224 - h * s) / 2, w * s, h * s);
+  const scaled = shrink(source, w * s, h * s);
+  ctx.drawImage(scaled, (224 - scaled.width) / 2, (224 - scaled.height) / 2);
   const px = ctx.getImageData(0, 0, 224, 224).data;
   const out = new Float32Array(3 * 224 * 224);
   for (let i = 0; i < 224 * 224; i++) {
@@ -72,9 +73,7 @@ const dist2 = (a, b) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) 
 export function dominantColours(source) {
   const s = 64 / Math.max(source.width, source.height);
   const w = Math.max(1, Math.round(source.width * s)), h = Math.max(1, Math.round(source.height * s));
-  const ctx = new OffscreenCanvas(w, h).getContext('2d');
-  ctx.drawImage(source, 0, 0, w, h);
-  const px = ctx.getImageData(0, 0, w, h).data;
+  const px = shrink(source, w, h).getContext('2d').getImageData(0, 0, w, h).data;
 
   const lab = [], weight = [], border = [], opaque = [];
   let cutout = false;

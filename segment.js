@@ -1,9 +1,11 @@
-// Tap-to-select: SlimSAM (Segment Anything) turns tapped points into an outline of the item.
+// Tap-to-select: EdgeSAM (a phone-sized Segment Anything) turns a tapped point into outlines of the item.
 // encode() runs the heavy image encoder once per photo; segment() is cheap and runs on every tap.
+// EdgeSAM-3x was chosen over SlimSAM-77 after measuring: ~3x faster in the browser, same outline quality.
 
 import { getOrt, getSession, run, isEncoderOnGpu, gpuFailed } from './models.js';
+import { shrink } from './imaging.js';
 
-const MEAN = [0.485, 0.456, 0.406];
+const MEAN = [0.485, 0.456, 0.406]; // ImageNet normalisation (EdgeSAM's 123.675/58.395 on 0-255 pixels)
 const STD = [0.229, 0.224, 0.225];
 
 // Returns an opaque handle used by segment(). source: ImageBitmap or canvas.
@@ -11,9 +13,7 @@ export async function encode(source) {
   const [ort, session] = await Promise.all([getOrt(), getSession('samEncoder')]);
   const W = source.width, H = source.height, s = 1024 / Math.max(W, H);
   const nw = Math.round(W * s), nh = Math.round(H * s);
-  const ctx = new OffscreenCanvas(nw, nh).getContext('2d');
-  ctx.drawImage(source, 0, 0, nw, nh);
-  const px = ctx.getImageData(0, 0, nw, nh).data;
+  const px = shrink(source, nw, nh).getContext('2d').getImageData(0, 0, nw, nh).data;
   const data = new Float32Array(3 * 1024 * 1024); // padded bottom/right with zeros
   for (let y = 0; y < nh; y++) {
     for (let x = 0; x < nw; x++) {
@@ -21,7 +21,7 @@ export async function encode(source) {
       for (let c = 0; c < 3; c++) data[c * 1024 * 1024 + o] = (px[i + c] / 255 - MEAN[c]) / STD[c];
     }
   }
-  const feeds = { pixel_values: new ort.Tensor('float32', data, [1, 3, 1024, 1024]) };
+  const feeds = { image: new ort.Tensor('float32', data, [1, 3, 1024, 1024]) };
   let out;
   try {
     out = await run(session, feeds); // same priority as type detection, first come first served
@@ -30,27 +30,38 @@ export async function encode(source) {
     gpuFailed(err); // didn't work on this graphics chip: redo it on the processor
     out = await run(await getSession('samEncoder'), feeds);
   }
-  return { W, H, s, nw, nh, emb: out.image_embeddings, pos: out.image_positional_embeddings };
+  return { W, H, s, nw, nh, emb: out.image_embeddings };
 }
 
-// points: [{ x, y, include }] in source pixels. Returns 3 candidate masks sorted small -> large,
-// each { canvas (W x H, alpha = mask), bbox, area, score }, plus the index of the best-scoring one.
+// points: [{ x, y, include }] in source pixels. Returns the distinct candidate masks (up to 4) sorted
+// small -> large, each { canvas (W x H, alpha = mask), bbox, area, score }, plus the index of the best-scoring one.
 export async function segment(enc, points) {
   const [ort, session] = await Promise.all([getOrt(), getSession('samDecoder')]);
   const coords = new Float32Array(points.flatMap(p => [p.x * enc.s, p.y * enc.s]));
-  const labels = BigInt64Array.from(points.map(p => BigInt(p.include ? 1 : 0)));
+  const labels = Float32Array.from(points.map(p => (p.include ? 1 : 0)));
   const out = await run(session, {
-    input_points: new ort.Tensor('float32', coords, [1, 1, points.length, 2]),
-    input_labels: new ort.Tensor('int64', labels, [1, 1, points.length]),
     image_embeddings: enc.emb,
-    image_positional_embeddings: enc.pos,
+    point_coords: new ort.Tensor('float32', coords, [1, points.length, 2]),
+    point_labels: new ort.Tensor('float32', labels, [1, points.length]),
   }, { priority: 2 }); // a tap's outline jumps ahead of queued type detection
-  const scores = out.iou_scores.data, masks = out.pred_masks.data;
+  const scores = out.scores.data, masks = out.masks.data, count = out.masks.dims[1];
   const n = 256 * 256;
-  const cands = [0, 1, 2].map(k => ({ ...toMask(enc, masks.subarray(k * n, (k + 1) * n)), score: scores[k] }));
-  const best = cands.reduce((b, c, i) => c.score > cands[b].score ? i : b, 0);
-  const order = [0, 1, 2].sort((a, b) => cands[a].area - cands[b].area);
-  return { masks: order.map(i => cands[i]), best: order.indexOf(best) };
+  const low = [...Array(count).keys()].map(k => masks.subarray(k * n, (k + 1) * n));
+  // drop near-duplicates (the model often returns two practically identical outlines), keep the higher score
+  const keep = [];
+  for (const k of [...low.keys()].sort((a, b) => scores[b] - scores[a])) {
+    if (!keep.some(j => overlap(low[j], low[k]) > 0.95)) keep.push(k);
+  }
+  const cands = keep.map(k => ({ ...toMask(enc, low[k]), score: scores[k] }));
+  const order = [...cands.keys()].sort((a, b) => cands[a].area - cands[b].area);
+  return { masks: order.map(i => cands[i]), best: order.indexOf(0) }; // keep[0] is the best score
+}
+
+// intersection over union of two low-res masks (logit > 0)
+function overlap(a, b) {
+  let inter = 0, union = 0;
+  for (let i = 0; i < a.length; i++) { const x = a[i] > 0, y = b[i] > 0; inter += x && y; union += x || y; }
+  return union ? inter / union : 1;
 }
 
 // Low-res 256x256 logits -> soft alpha mask at source size. The 256 grid covers the padded
