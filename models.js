@@ -17,6 +17,13 @@ const MODELS = {
   samDecoder: { url: EDGESAM + 'edge_sam_3x_decoder.onnx', size: 15937006 },
 };
 
+// Downloaded only when needed: body pose for "On me", when the user sets their photo in Settings.
+// MoveNet Thunder at full precision; the int8 and fp16 exports give garbage keypoints.
+const MOVENET = `${HF}Xenova/movenet-singlepose-thunder/resolve/38296077a99667cdad67af5096ce7eeb9b327453/onnx/`;
+const ON_DEMAND = {
+  pose: { url: MOVENET + 'model.onnx', size: 25067197 },
+};
+
 const MODELS_ENCODER_ID = 'edgesam-3x';
 
 let ortPromise;
@@ -154,7 +161,7 @@ async function required() {
 
 // Removes cached models the app no longer uses (e.g. SlimSAM, before EdgeSAM replaced it).
 async function pruneOldModels() {
-  const cache = await caches.open(CACHE), wanted = new Set(Object.values(MODELS).map(m => m.url));
+  const cache = await caches.open(CACHE), wanted = new Set([...Object.values(MODELS), ...Object.values(ON_DEMAND)].map(m => m.url));
   for (const req of await cache.keys()) if (!wanted.has(req.url)) await cache.delete(req);
 }
 
@@ -239,6 +246,21 @@ export function getSession(name) {
   sessions[name].catch(() => { delete sessions[name]; });
   return sessions[name];
 }
+
+// Pose model session, downloading it first if needed (onProgress gets 0..1 while downloading).
+export function poseSession(onProgress) {
+  sessions.pose ??= (async () => {
+    const cache = await caches.open(CACHE), m = ON_DEMAND.pose;
+    if (!(await cache.match(m.url))) {
+      let done = 0;
+      await fetchInto(cache, m, n => { done += n; onProgress?.(Math.min(1, done / m.size)); });
+    }
+    return createSession(m, ['wasm']);
+  })();
+  sessions.pose.catch(() => { delete sessions.pose; });
+  return sessions.pose;
+}
+export const poseMB = async () => (await caches.open(CACHE).then(c => c.match(ON_DEMAND.pose.url))) ? 0 : Math.round(ON_DEMAND.pose.size / 1e6);
 
 // Creates the sessions ahead of time (e.g. while the photo picker is open) so the first photo is fast.
 export async function warmUp() {

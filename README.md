@@ -17,11 +17,13 @@ Everything is stored on the device (IndexedDB) — no account, no server.
 - **Outfits** — one swipe carousel per layer: Tops, Bottoms (incl. dresses) and Shoes by default,
   Outerwear and Accessories switched on with the buttons above (each row starts with "none");
   the centred item of each row is the outfit. Pictures are sized to fill the screen.
+  **On me** shows the outfit on a full-length photo of you (a paper doll, set in Settings): drag an
+  item to move it, pinch to resize, double-tap to put it back. Adjustments are saved on the item.
 - **Trips** — dates of a trip, one or more saved outfits per day, an automatic **packing list**
   (items of the planned outfits + extras, with "worn N days" and tick-off checkboxes), and
   **more outfits**: saved outfits made only of packed items (plan them in one tap) plus a
   mix & match carousel limited to the packing list.
-- **Settings** — export/import a JSON backup (photos included), AI model status.
+- **Settings** — export/import a JSON backup (photos included), your photo for On me, AI model status.
 
 The AI models download automatically on first launch (progress bar at the top); the app is
 usable meanwhile and anything that needs them waits.
@@ -41,6 +43,11 @@ usable meanwhile and anything that needs them waits.
 - **Colour:** k-means in Lab over the item's pixels — the cut-out mask if you tapped, otherwise
   background estimated from the border pixels plus centre weighting — then the nearest named
   colour from the palette in `catalog.js`.
+- **On me:** MoveNet Thunder (`Xenova/movenet-singlepose-thunder`, full precision, 25 MB, Apache 2.0;
+  the int8 and fp16 exports give garbage keypoints) finds shoulders, hips and ankles once, when the
+  photo is set; downloaded only then. Items are placed by type (tops on the shoulder line, trousers
+  waist to ankles, shoes per foot, ...) in shoulder-width units, so adjustments survive a new photo.
+  Items saved before this have no transparency: the white around them is cleared instead.
 
 Best results: one item, laid flat or on a hanger, plain background, good light.
 
@@ -49,11 +56,12 @@ Best results: one item, laid flat or on a hanger, plain background, good light.
 | File | Role |
 |---|---|
 | `index.html`, `style.css`, `app.js` | UI and hash router |
-| `db.js` | IndexedDB wrapper (`items`, `outfits`, `trips`) |
+| `db.js` | IndexedDB wrapper (`items`, `outfits`, `trips`, `settings`) |
 | `catalog.js` | type groups + colour palette |
 | `models.js` | model download/cache, onnxruntime sessions |
 | `classify.js` | CLIP type detection + colour extraction |
 | `segment.js` | EdgeSAM tap-to-select, cut-outs |
+| `doll.js` | On me: MoveNet body pose, item placement |
 | `fingerprint.js` | photo fingerprints (SHA-256 + 16×16 colour thumbnail) for duplicate warnings |
 | `labels.json` | precomputed CLIP text embeddings (generated) |
 | `sw.js`, `manifest.webmanifest`, `icons/` | offline + installable |

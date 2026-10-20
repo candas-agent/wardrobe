@@ -69,12 +69,12 @@ function onChips(name, cb) {
   });
 }
 
-async function resizeToBlob(source, max, quality) {
+async function resizeToBlob(source, max, quality, type = 'image/jpeg') {
   const c = fit(source, max);
-  if (c instanceof OffscreenCanvas) return c.convertToBlob({ type: 'image/jpeg', quality });
+  if (c instanceof OffscreenCanvas) return c.convertToBlob({ type, quality });
   const copy = new OffscreenCanvas(c.width, c.height); // an ImageBitmap that's already small enough
   copy.getContext('2d').drawImage(c, 0, 0);
-  return copy.convertToBlob({ type: 'image/jpeg', quality });
+  return copy.convertToBlob({ type, quality }); // browsers without WebP encoding give PNG instead
 }
 
 // ---------- wardrobe ----------
@@ -174,7 +174,7 @@ function bindItemForm(draft) {
 const toItem = d => ({
   id: d.id, createdAt: d.createdAt, type: d.type, colour: d.colour, colour2: d.colour2 || '',
   name: d.name.trim(), notes: d.notes.trim(), photo: d.photo, thumb: d.thumb, original: d.original ?? null,
-  source: d.source ?? null,
+  source: d.source ?? null, cutout: d.cutout ?? null, fit: d.fit ?? null,
 });
 
 // ---------- duplicate warning ----------
@@ -274,7 +274,8 @@ async function addNext() {
     if (draft.cut) {
       const flat = seg().then(m => m.onWhite(draft.cut));
       draft.original = draft.photo;
-      [draft.photo, draft.thumb] = await Promise.all([resizeToBlob(await flat, 1280, 0.92), resizeToBlob(await flat, 400, 0.85)]);
+      [draft.photo, draft.thumb, draft.cutout] = await Promise.all([resizeToBlob(await flat, 1280, 0.92), resizeToBlob(await flat, 400, 0.85),
+        resizeToBlob(draft.cut, 900, 0.9, 'image/webp')]); // keeps the transparency, for 'On me'
     }
     await db.put('items', toItem(draft));
     navigator.storage?.persist?.(); // ask the browser not to evict our data
@@ -344,6 +345,7 @@ const HOLD_MS = 450;
 const hitDot = (draft, stage, at) => draft.points.findIndex(p => Math.hypot(p.x - at.x, p.y - at.y) < dotRadius(stage) * 1.8);
 
 const seg = () => import('./segment.js');
+const doll = () => import('./doll.js');
 
 function drawStage(draft) {
   const stage = $('#stage');
@@ -549,9 +551,10 @@ async function outfitView(id, mix = null) {
     </div>
     ${mix ? '<p class="muted">Only items on the packing list are shown.</p>' : ''}
     <input type="text" id="oname" placeholder="Outfit name, e.g. Friday office" value="${esc(b.name)}">
-    <div class="chips" id="layerToggles">${rows.filter(r => OPTIONAL_LAYERS.includes(r.key)).map(r =>
+    <div class="chips" id="layerToggles"><button class="chip${b.onMe ? ' on' : ''}" data-v="me">${b.onMe ? '✓' : '👤'} On me</button>${
+      rows.filter(r => OPTIONAL_LAYERS.includes(r.key)).map(r =>
       `<button class="chip${b.show[r.key] ? ' on' : ''}" data-v="${r.key}">${b.show[r.key] ? '✓' : '+'} ${r.label}</button>`).join('')}</div>
-    ${rows.filter(visible).map(r => `
+    ${b.onMe ? '<div id="dollBox"></div>' : rows.filter(visible).map(r => `
       <div class="layer">
         <div class="layer-label">${r.label}</div>
         <div class="carousel" data-layer="${r.key}">
@@ -595,10 +598,13 @@ async function outfitView(id, mix = null) {
     car.addEventListener('click', e => { const s = e.target.closest('.slot'); if (s) centreOn(s, 'smooth'); });
   }
 
+  if (b.onMe) await dollView($('#dollBox'), rows.filter(visible).map(r => ({ layer: r.key, item: r.items.find(i => i.id === b.picks[r.key]) })));
+
   $('#oname').addEventListener('input', e => { b.name = e.target.value; });
   $('#layerToggles').addEventListener('click', e => {
     const t = e.target.closest('.chip'); if (!t) return;
     const k = t.dataset.v;
+    if (k === 'me') { b.onMe = !b.onMe; return outfitView(id, mix); }
     b.show[k] = !b.show[k];
     if (b.show[k] && !b.picks[k]) b.picks[k] = rows.find(r => r.key === k).items[0]?.id ?? null;
     outfitView(id, mix);
@@ -618,6 +624,109 @@ async function outfitView(id, mix = null) {
     builder = null;
     location.hash = '#/outfits';
   });
+}
+
+// ---------- on me (paper doll) ----------
+
+const DRAW_ORDER = ['bottom', 'shoes', 'top', 'outer', 'acc']; // bottom to top
+const arts = new Map(); // item id -> Promise of { url, w, h, alpha(), rowWidth() }
+function artFor(d, item) {
+  if (!arts.has(item.id)) {
+    const p = d.itemArt(item).then(a => ({ ...a, url: URL.createObjectURL(a.blob) }));
+    p.catch(() => arts.delete(item.id));
+    arts.set(item.id, p);
+  }
+  return arts.get(item.id);
+}
+
+// The user's photo wearing picks ([{ layer, item }]). Drag an item to move it, pinch to resize, double-tap
+// to put it back. Adjustments are saved on the item, so they apply in every outfit.
+async function dollView(box, picks) {
+  const me = await db.get('settings', 'me');
+  if (!me) {
+    box.innerHTML = `<div class="empty"><div class="big">👤</div><p>Add a full-length photo of yourself in
+      <a href="#/settings">Settings</a> to see your outfits on you.</p></div>`;
+    return;
+  }
+  const d = await doll();
+  const worn = picks.filter(p => p.item).sort((a, b) => DRAW_ORDER.indexOf(a.layer) - DRAW_ORDER.indexOf(b.layer));
+  const art = await Promise.all(worn.map(p => artFor(d, p.item)));
+  const fits = worn.map(p => ({ dx: 0, dy: 0, s: 1, ...p.item.fit }));
+  const { W, H } = me.pose;
+  const boxes = i => d.place(me.pose, art[i], worn[i].layer, worn[i].item.type, fits[i]);
+  box.innerHTML = `<div class="doll" style="aspect-ratio:${W}/${H}"><img class="me" src="${blobUrl(me.photo)}" alt="">${
+    worn.map((p, i) => boxes(i).map((_, k) => `<img class="worn" data-i="${i}" data-k="${k}" src="${art[i].url}" alt="">`).join('')).join('')}</div>
+    <p class="muted small center">${worn.length ? 'Drag an item to move it, pinch to resize, double-tap to put it back.' : 'Pick some items first.'}</p>`;
+  const stage = box.querySelector('.doll');
+  // as big as fits between the toggles and the tab bar
+  const room = document.querySelector('.tabs').getBoundingClientRect().top - stage.getBoundingClientRect().top - 40;
+  stage.style.width = `${Math.min(box.clientWidth, Math.max(160, room) * W / H)}px`;
+  const els = [...stage.querySelectorAll('.worn')];
+  const layout = () => els.forEach(el => {
+    const r = boxes(+el.dataset.i)[+el.dataset.k];
+    Object.assign(el.style, { left: `${r.x / W * 100}%`, top: `${r.y / H * 100}%`, width: `${r.w / W * 100}%`, height: `${r.h / H * 100}%`,
+      transform: r.mirror ? 'scaleX(-1)' : '' });
+  });
+  layout();
+
+  const sw = d.shoulderWidth(me.pose);
+  const toPhoto = e => { const r = stage.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H }; };
+  const hit = at => { // topmost item with a visible pixel under the finger
+    for (let i = worn.length - 1; i >= 0; i--) {
+      for (const r of boxes(i)) {
+        let u = (at.x - r.x) / r.w, v = (at.y - r.y) / r.h;
+        if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+        if (r.mirror) u = 1 - u;
+        if (art[i].alpha(Math.floor(u * art[i].w), Math.floor(v * art[i].h)) > 60) return i;
+      }
+    }
+    return -1;
+  };
+  const pointers = new Map();
+  let active = -1, moved = false, start = null, lastTap = { t: 0, i: -1 };
+  const select = i => els.forEach(el => el.classList.toggle('sel', +el.dataset.i === i));
+  const save = async i => {
+    const item = await db.get('items', worn[i].item.id);
+    if (!item) return;
+    item.fit = { ...fits[i] };
+    worn[i].item.fit = item.fit;
+    await db.put('items', item);
+  };
+  stage.addEventListener('pointerdown', e => {
+    stage.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, toPhoto(e));
+    if (pointers.size === 1) { active = hit(toPhoto(e)); moved = false; start = { x: e.clientX, y: e.clientY }; select(active); }
+  });
+  stage.addEventListener('pointermove', e => {
+    if (!pointers.has(e.pointerId) || active < 0) return;
+    const prev = [...pointers.values()], before = pointers.get(e.pointerId), now = toPhoto(e);
+    pointers.set(e.pointerId, now);
+    const f = fits[active];
+    if (pointers.size === 1) {
+      f.dx += (now.x - before.x) / sw; f.dy += (now.y - before.y) / sw;
+    } else {
+      const cur = [...pointers.values()];
+      const span = ps => Math.hypot(ps[0].x - ps[1].x, ps[0].y - ps[1].y);
+      if (span(prev) > 10) f.s = Math.max(0.3, Math.min(3, f.s * span(cur) / span(prev)));
+      f.dx += (now.x - before.x) / 2 / sw; f.dy += (now.y - before.y) / 2 / sw; // the pinch centre moves half as far
+    }
+    moved ||= pointers.size > 1 || Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8;
+    layout();
+  });
+  const end = e => {
+    if (!pointers.delete(e.pointerId) || pointers.size || active < 0) return;
+    const i = active;
+    if (moved) save(i);
+    else if (Date.now() - lastTap.t < 350 && lastTap.i === i) { // double-tap: back to where it was placed automatically
+      Object.assign(fits[i], { dx: 0, dy: 0, s: 1 });
+      layout();
+      save(i);
+    }
+    lastTap = moved ? { t: 0, i: -1 } : { t: Date.now(), i };
+    select(-1);
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
 }
 
 // ---------- trips ----------
@@ -916,13 +1025,15 @@ const blobToDataUrl = blob => new Promise((resolve, reject) => {
 });
 
 async function exportBackup() {
-  const [items, outfits, trips] = await Promise.all([db.getAll('items'), db.getAll('outfits'), db.getAll('trips')]);
+  const [items, outfits, trips, me] = await Promise.all([db.getAll('items'), db.getAll('outfits'), db.getAll('trips'), db.get('settings', 'me')]);
   const data = {
-    app: 'wardrobe', version: 2, exportedAt: new Date().toISOString(), outfits, trips,
+    app: 'wardrobe', version: 3, exportedAt: new Date().toISOString(), outfits, trips,
     items: await Promise.all(items.map(async i => ({
       ...i, photo: await blobToDataUrl(i.photo), thumb: await blobToDataUrl(i.thumb),
       original: i.original ? await blobToDataUrl(i.original) : null,
+      cutout: i.cutout ? await blobToDataUrl(i.cutout) : null,
     }))),
+    me: me ? { ...me, photo: await blobToDataUrl(me.photo) } : null,
   };
   const name = `wardrobe-backup-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
@@ -942,15 +1053,19 @@ async function importBackup(file) {
   if (data.app !== 'wardrobe') throw new Error('Not a wardrobe backup');
   const toBlob = async u => (await fetch(u)).blob();
   for (const i of data.items) {
-    await db.put('items', { ...i, photo: await toBlob(i.photo), thumb: await toBlob(i.thumb), original: i.original ? await toBlob(i.original) : null });
+    await db.put('items', { ...i, photo: await toBlob(i.photo), thumb: await toBlob(i.thumb), original: i.original ? await toBlob(i.original) : null,
+      cutout: i.cutout ? await toBlob(i.cutout) : null });
   }
+  if (data.me) await db.put('settings', { ...data.me, photo: await toBlob(data.me.photo) }); // v3+
   for (const o of data.outfits) await db.put('outfits', o);
   for (const t of data.trips ?? []) await db.put('trips', t); // v1 backups have no trips
   return data.items.length;
 }
 
+const meWarning = "⚠️ Couldn't find your whole body (shoulders, hips and feet) in this photo. Items are placed roughly; drag them into place, or try a full-length photo.";
+
 async function settingsView() {
-  const [items, outfits] = await Promise.all([db.getAll('items'), db.getAll('outfits')]);
+  const [items, outfits, me] = await Promise.all([db.getAll('items'), db.getAll('outfits'), db.get('settings', 'me')]);
   const hasModel = await models.modelsDownloaded().catch(() => false);
   const est = await navigator.storage?.estimate?.();
   const persisted = await navigator.storage?.persisted?.();
@@ -968,6 +1083,18 @@ async function settingsView() {
       <div class="status" id="bstatus"></div>
     </div>
     <div class="panel">
+      <strong>Me</strong>
+      <p class="muted">A full-length photo of you, to see outfits on you (Outfits → On me). It stays on this phone.</p>
+      ${me ? `<img class="me-thumb" src="${blobUrl(me.photo)}" alt="Your photo">` : ''}
+      <div class="row">
+        <label class="btn grow">${me ? 'Change photo' : 'Add photo'}<input type="file" accept="image/*" hidden id="mePhoto"></label>
+        ${me ? '<button class="btn" id="meDel">Remove</button>' : ''}
+      </div>
+      <div class="status" id="meStatus">${me && !me.pose.ok ? meWarning : ''}</div>
+      <p class="muted small">Best: standing straight, facing the camera, head to feet in the picture, arms a little away
+      from the body, plain background and fitted clothes.</p>
+    </div>
+    <div class="panel">
       <strong>AI helpers</strong>
       <p class="muted">${hasModel ? `Type detection and tap-to-select are ready (${await models.totalMB()} MB, work offline).`
         : 'Downloading (see the bar at the top)…'}<br>Running on: ${await models.backendLabel()}</p>
@@ -979,9 +1106,31 @@ async function settingsView() {
           : models.gpuFailReason() && models.gpuState() === 'on' ? `<p class="muted small">${esc(models.gpuFailReason())}</p>` : ''}`
         : '<p class="muted small">This browser has no graphics chip access (WebGPU), so the processor is used.</p>'}
     </div>
-    </div>
-    <p class="muted" style="font-size:.8rem">Type detection: OpenAI CLIP ViT-B/32. Tap-to-select: SlimSAM (Segment Anything). Both run on-device via onnxruntime-web.</p>`;
+    <p class="muted" style="font-size:.8rem">Type detection: OpenAI CLIP ViT-B/32. Tap-to-select: EdgeSAM (Segment Anything).
+    On me: MoveNet. All run on-device via onnxruntime-web.</p>`;
 
+  $('#mePhoto').addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    const status = $('#meStatus');
+    try {
+      const mb = await models.poseMB();
+      status.textContent = mb ? `Getting the body finder ready (one-time, ${mb} MB)…` : 'Finding your shoulders, hips and feet…';
+      const bmp = await createImageBitmap(f);
+      const photo = fit(bmp, 1600);
+      const pose = await (await doll()).detectPose(photo, p => { status.textContent = `Getting the body finder ready (one-time, ${mb} MB)… ${Math.round(p * 100)}%`; });
+      await db.put('settings', { id: 'me', photo: await resizeToBlob(photo, 1600, 0.9), pose, createdAt: Date.now() });
+      await settingsView();
+      if (pose.ok) toast('Photo saved');
+    } catch (err) {
+      console.error(err);
+      status.textContent = `Couldn't use this photo: ${err.message}`;
+    }
+  });
+  $('#meDel')?.addEventListener('click', async () => {
+    if (!confirm('Remove your photo?')) return;
+    await db.del('settings', 'me');
+    settingsView();
+  });
   $('#gpu')?.addEventListener('change', e => {
     models.setGpu(e.target.checked);
     location.reload(); // the AI engine is set up once per launch

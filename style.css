@@ -158,3 +158,13 @@ button.planned { cursor: pointer; }
 .sheet-body { overflow-y: auto; padding-top: 4px; }
 .sheet-body .grid { margin-top: 8px; }
 .planned .grow, .pack-row .grow, .sheet-head .grow { flex: 1; min-width: 0; }
+
+/* on me (paper doll) */
+.doll { position: relative; margin: 0 auto; max-width: 100%; overflow: hidden; border-radius: var(--radius); background: var(--card);
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.doll img { -webkit-user-drag: none; pointer-events: none; }
+.doll .me { display: block; width: 100%; height: 100%; }
+.doll .worn { position: absolute; }
+.doll .worn.sel { filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 4px var(--accent)); }
+.center { text-align: center; }
+.me-thumb { display: block; max-height: 220px; max-width: 100%; margin: 8px 0; border-radius: var(--radius); }
