@@ -14,6 +14,10 @@ Everything is stored on the device (IndexedDB) — no account, no server.
 - **Wardrobe** — grid with search (name, notes, type, colour) and type/colour filters.
 - **Outfits** — one swipe carousel per layer (Outerwear, Tops, Bottoms incl. dresses, Shoes,
   Accessories; each starts with "none"); the centred item of each row is the outfit.
+- **Trips** — dates of a trip, one or more saved outfits per day, an automatic **packing list**
+  (items of the planned outfits + extras, with "worn N days" and tick-off checkboxes), and
+  **more outfits**: saved outfits made only of packed items (plan them in one tap) plus a
+  mix & match carousel limited to the packing list.
 - **Settings** — export/import a JSON backup (photos included), AI model status.
 
 The AI models download automatically on first launch (progress bar at the top); the app is
@@ -39,7 +43,7 @@ Best results: one item, laid flat or on a hanger, plain background, good light.
 | File | Role |
 |---|---|
 | `index.html`, `style.css`, `app.js` | UI and hash router |
-| `db.js` | IndexedDB wrapper (`items`, `outfits`) |
+| `db.js` | IndexedDB wrapper (`items`, `outfits`, `trips`) |
 | `catalog.js` | type groups + colour palette |
 | `models.js` | model download/cache, onnxruntime sessions |
 | `classify.js` | CLIP type detection + colour extraction |

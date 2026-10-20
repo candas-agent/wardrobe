@@ -1,15 +1,16 @@
-// Minimal IndexedDB wrapper: stores "items" and "outfits", keyed by id.
+// Minimal IndexedDB wrapper: stores "items", "outfits" and "trips", keyed by id.
 
 const DB_NAME = 'wardrobe';
 let dbPromise;
 
 function open() {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
-      db.createObjectStore('items', { keyPath: 'id' });
-      db.createObjectStore('outfits', { keyPath: 'id' });
+      for (const name of ['items', 'outfits', 'trips']) { // v2 added trips
+        if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: 'id' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);

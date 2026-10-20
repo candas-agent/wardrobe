@@ -11,7 +11,7 @@ let types = [], typeById = {};
 const filters = { q: '', group: '', colour: '' };
 let addQueue = [], addTotal = 0;
 let currentDraft = null; // draft shown in the add form; late type results for other drafts are dropped
-let builder = null; // outfit being edited: { id, isNew, name, createdAt, picks: { layer: itemId|null } }
+let builder = null; // outfit being edited: { key, id (null if new), name, createdAt, picks: { layer: itemId|null } }
 
 // ---------- helpers ----------
 
@@ -447,6 +447,7 @@ async function itemView(id) {
   $('#del').addEventListener('click', async () => {
     if (!confirm('Delete this item? It will also be removed from outfits.')) return;
     await db.del('items', id);
+    await forgetInTrips({ itemId: id });
     for (const o of outfits) await db.put('outfits', { ...o, itemIds: o.itemIds.filter(x => x !== id) });
     toast('Deleted');
     location.hash = '#/';
@@ -480,25 +481,30 @@ const LAYERS = [
 ];
 const NEW_OUTFIT_STARTS_WITH = ['top', 'bottom', 'shoes']; // other layers start on "none"
 
-async function outfitView(id) {
-  const items = (await db.getAll('items')).sort((a, b) => b.createdAt - a.createdAt);
+// mix: { trip, itemIds: Set } — new outfit from a trip's packing list only; saving returns to the trip.
+async function outfitView(id, mix = null) {
+  let items = (await db.getAll('items')).sort((a, b) => b.createdAt - a.createdAt);
+  if (mix) items = items.filter(i => mix.itemIds.has(i.id));
   const rows = LAYERS.map(l => ({ ...l, items: items.filter(i => l.groups.includes(typeById[i.type]?.group)) }));
-  if (builder?.id !== id) {
+  const key = mix ? `mix:${mix.trip.id}` : id;
+  const back = mix ? `#/trip/${mix.trip.id}` : '#/outfits';
+  if (builder?.key !== key) {
     const o = id === 'new' ? null : await db.get('outfits', id);
     if (id !== 'new' && !o) { view.innerHTML = `<p>Outfit not found.</p><a href="#/outfits">Back</a>`; return; }
     const picks = Object.fromEntries(rows.map(r => [r.key,
       o ? r.items.find(i => o.itemIds.includes(i.id))?.id ?? null
         : NEW_OUTFIT_STARTS_WITH.includes(r.key) ? r.items[0]?.id ?? null : null]));
-    builder = { id, isNew: !o, name: o?.name ?? '', createdAt: o?.createdAt ?? Date.now(), picks };
+    builder = { key, id: o?.id ?? null, name: o?.name ?? '', createdAt: o?.createdAt ?? Date.now(), picks };
   }
   const b = builder;
 
   view.innerHTML = `
     <div class="topbar">
-      <a class="back" href="#/outfits">‹ Outfits</a>
-      ${b.isNew ? '' : '<button class="btn danger" id="odel">Delete</button>'}
+      <a class="back" href="${back}">‹ ${mix ? esc(mix.trip.name || 'Trip') : 'Outfits'}</a>
+      ${b.id ? '<button class="btn danger" id="odel">Delete</button>' : ''}
       <button class="btn primary" id="osave">Save</button>
     </div>
+    ${mix ? '<p class="muted">Only items on the packing list are shown.</p>' : ''}
     <input type="text" id="oname" placeholder="Outfit name, e.g. Friday office" value="${esc(b.name)}">
     ${rows.map(r => `
       <div class="layer">
@@ -536,17 +542,307 @@ async function outfitView(id) {
   $('#osave').addEventListener('click', async () => {
     const itemIds = LAYERS.map(l => b.picks[l.key]).filter(Boolean);
     if (!itemIds.length) return toast('Pick at least one item');
-    await db.put('outfits', { id: b.isNew ? db.newId() : b.id, name: b.name.trim(), createdAt: b.createdAt, itemIds });
+    await db.put('outfits', { id: b.id ?? db.newId(), name: b.name.trim(), createdAt: b.createdAt, itemIds });
     builder = null;
     toast('Outfit saved');
-    location.hash = '#/outfits';
+    location.hash = back;
   });
   $('#odel')?.addEventListener('click', async () => {
     if (!confirm('Delete this outfit? The clothes stay in your wardrobe.')) return;
     await db.del('outfits', b.id);
+    await forgetInTrips({ outfitId: b.id });
     builder = null;
     location.hash = '#/outfits';
   });
+}
+
+// ---------- trips ----------
+// trip: { id, name, start, end ('YYYY-MM-DD'), days: { date: [outfitId] }, extraItemIds: [], packed: [itemId], createdAt }
+// Changes save immediately. Assignments outside the date range are kept (in case the dates change back)
+// but ignored for the packing list.
+
+let tripSeg = 'plan'; // which section of a trip is showing: plan | pack | more
+const MAX_TRIP_DAYS = 60;
+
+const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const parseDate = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (s, n) => { const d = parseDate(s); d.setDate(d.getDate() + n); return isoDate(d); };
+const fmtDay = s => parseDate(s).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+const fmtRange = t => t.start === t.end ? fmtDay(t.start) : `${fmtDay(t.start)} – ${fmtDay(t.end)}`;
+
+function tripDays(t) {
+  const days = [];
+  for (let d = t.start; d <= t.end && days.length < MAX_TRIP_DAYS; d = addDays(d, 1)) days.push(d);
+  return days;
+}
+
+// Packing list = items of the outfits planned on the trip's days + extras.
+function packingList(t, outfitById, itemById) {
+  const days = new Map(); // itemId -> number of days it's worn
+  for (const d of tripDays(t)) {
+    const worn = new Set((t.days[d] ?? []).flatMap(oid => outfitById[oid]?.itemIds ?? []));
+    worn.forEach(id => days.set(id, (days.get(id) ?? 0) + 1));
+  }
+  const ids = new Set([...days.keys(), ...t.extraItemIds].filter(id => itemById[id]));
+  const entries = [...ids].map(id => ({ item: itemById[id], days: days.get(id) ?? 0, extra: !days.has(id) }));
+  return { ids, entries };
+}
+
+const plannedOutfitIds = t => new Set(tripDays(t).flatMap(d => t.days[d] ?? []));
+
+// Saved outfits not planned yet whose items are all on the packing list.
+const possibleOutfits = (t, outfits, ids) => {
+  const planned = plannedOutfitIds(t);
+  return outfits.filter(o => !planned.has(o.id) && o.itemIds.length && o.itemIds.every(id => ids.has(id)));
+};
+
+// (tops x bottoms + dresses/jumpsuits) x shoes, from the packed items
+function combinations(ids, itemById) {
+  const n = { Tops: 0, Bottoms: 0, 'Full body': 0, Shoes: 0 };
+  ids.forEach(id => { const g = typeById[itemById[id]?.type]?.group; if (g in n) n[g]++; });
+  return (n.Tops * n.Bottoms + n['Full body']) * Math.max(1, n.Shoes);
+}
+
+const outfitThumbs = (o, itemById) =>
+  o.itemIds.map(id => itemById[id]).filter(Boolean).map(i => `<img src="${blobUrl(i.thumb)}" alt="">`).join('');
+
+async function forgetInTrips({ outfitId, itemId }) {
+  for (const t of await db.getAll('trips')) {
+    let changed = false;
+    const drop = (list, x) => { const kept = list.filter(v => v !== x); changed ||= kept.length !== list.length; return kept; };
+    if (outfitId) for (const d in t.days) t.days[d] = drop(t.days[d], outfitId);
+    if (itemId) { t.extraItemIds = drop(t.extraItemIds, itemId); t.packed = drop(t.packed, itemId); }
+    if (changed) await db.put('trips', t);
+  }
+}
+
+async function tripsView() {
+  const [trips, outfits, items] = await Promise.all([db.getAll('trips'), db.getAll('outfits'), db.getAll('items')]);
+  const outfitById = Object.fromEntries(outfits.map(o => [o.id, o]));
+  const itemById = Object.fromEntries(items.map(i => [i.id, i]));
+  const today = isoDate(new Date());
+  const upcoming = trips.filter(t => t.end >= today).sort((a, b) => a.start.localeCompare(b.start));
+  const past = trips.filter(t => t.end < today).sort((a, b) => b.start.localeCompare(a.start));
+  const card = t => {
+    const days = tripDays(t), planned = days.filter(d => t.days[d]?.length).length;
+    const { ids } = packingList(t, outfitById, itemById);
+    return `<a class="outfit" href="#/trip/${t.id}">
+      <strong>${esc(t.name || 'Trip')}</strong> <span class="muted">· ${fmtRange(t)}</span>
+      <div class="muted small">${days.length} day${days.length > 1 ? 's' : ''} · ${planned} planned · ${ids.size} item${ids.size === 1 ? '' : 's'} to pack</div></a>`;
+  };
+  view.innerHTML = `
+    <div class="topbar"><strong class="title">Trips</strong><button class="btn primary" id="newTrip">+ New</button></div>
+    ${trips.length ? upcoming.map(card).join('') + (past.length ? `<h2>Past</h2>${past.map(card).join('')}` : '')
+      : `<div class="empty"><div class="big">🧳</div><p>Plan what to wear on each day of a trip, and get a packing list.</p></div>`}`;
+  $('#newTrip').addEventListener('click', async () => {
+    const start = isoDate(new Date());
+    const t = { id: db.newId(), name: '', start, end: addDays(start, 2), days: {}, extraItemIds: [], packed: [], createdAt: Date.now() };
+    await db.put('trips', t);
+    tripSeg = 'plan';
+    location.hash = `#/trip/${t.id}`;
+  });
+}
+
+async function tripView(id) {
+  const [t, outfits, items] = await Promise.all([db.get('trips', id), db.getAll('outfits'), db.getAll('items')]);
+  if (!t) { view.innerHTML = `<p>Trip not found.</p><a href="#/trips">Back</a>`; return; }
+  outfits.sort((a, b) => b.createdAt - a.createdAt);
+  const outfitById = Object.fromEntries(outfits.map(o => [o.id, o]));
+  const itemById = Object.fromEntries(items.map(i => [i.id, i]));
+  const save = () => db.put('trips', t);
+
+  view.innerHTML = `
+    <div class="topbar"><a class="back" href="#/trips">‹ Trips</a><button class="btn danger" id="tdel">Delete</button></div>
+    <input type="text" id="tname" placeholder="Trip name, e.g. Lisbon weekend" value="${esc(t.name)}">
+    <div class="row dates">
+      <label class="grow"><span class="field">From</span><input type="date" id="tstart" value="${t.start}"></label>
+      <label class="grow"><span class="field">To</span><input type="date" id="tend" value="${t.end}"></label>
+    </div>
+    <div class="chips seg" id="tseg"></div>
+    <div id="tbody"></div>`;
+
+  const renderSeg = () => {
+    const { ids } = packingList(t, outfitById, itemById);
+    $('#tseg').innerHTML = [['plan', 'Plan'], ['pack', `Pack · ${ids.size}`], ['more', 'More outfits']]
+      .map(([k, l]) => `<button class="chip${tripSeg === k ? ' on' : ''}" data-v="${k}">${l}</button>`).join('');
+  };
+  const renderBody = () => {
+    renderSeg();
+    ({ plan: renderPlan, pack: renderPack, more: renderMore })[tripSeg]();
+  };
+
+  // --- plan: one row per day, outfits picked from the saved ones
+  const renderPlan = () => {
+    const days = tripDays(t);
+    $('#tbody').innerHTML = (outfits.length ? '' : `<div class="notice">You have no outfits yet. Create some in the
+        <a href="#/outfits">Outfits</a> tab, then plan them here.</div>`)
+      + days.map(d => `
+        <div class="day">
+          <div class="day-head"><strong>${fmtDay(d)}</strong>${outfits.length ? `<button class="chip" data-add="${d}">+ Outfit</button>` : ''}</div>
+          ${(t.days[d] ?? []).filter(oid => outfitById[oid]).map(oid => `
+            <div class="planned">
+              <div class="thumbs">${outfitThumbs(outfitById[oid], itemById)}</div>
+              <span class="grow">${esc(outfitById[oid].name || 'Outfit')}</span>
+              <button class="x" data-rm="${d}|${oid}" aria-label="Remove">×</button>
+            </div>`).join('')}
+        </div>`).join('')
+      + ((parseDate(t.end) - parseDate(t.start)) / 864e5 + 1 > MAX_TRIP_DAYS
+        ? `<p class="muted small">Only the first ${MAX_TRIP_DAYS} days are shown.</p>` : '');
+  };
+
+  // --- pack: items of the planned outfits + extras, tick off what's packed
+  const renderPack = () => {
+    const { entries } = packingList(t, outfitById, itemById);
+    const packed = new Set(t.packed);
+    const done = entries.filter(e => packed.has(e.item.id)).length;
+    const groupOf = e => typeById[e.item.type]?.group ?? 'Unsorted';
+    const groups = [...GROUPS, 'Unsorted'].map(g => [g, entries.filter(e => groupOf(e) === g)]).filter(([, es]) => es.length);
+    $('#tbody').innerHTML = (entries.length ? `
+        <div class="row"><strong class="grow">${done} of ${entries.length} packed</strong></div>
+        <progress value="${done}" max="${entries.length}"></progress>
+        ${groups.map(([g, es]) => `<h2>${g}</h2>${es.map(e => `
+          <label class="pack-row${packed.has(e.item.id) ? ' done' : ''}">
+            <input type="checkbox" data-pack="${e.item.id}"${packed.has(e.item.id) ? ' checked' : ''}>
+            <img src="${blobUrl(e.item.thumb)}" alt="">
+            <span class="grow">${esc(itemTitle(e.item))}<br>
+              <small class="muted">${e.extra ? 'extra' : `${e.days} day${e.days > 1 ? 's' : ''}`}</small></span>
+            ${e.extra ? `<button class="x" data-unextra="${e.item.id}" aria-label="Remove">×</button>` : ''}
+          </label>`).join('')}`).join('')}`
+      : `<p class="muted">Plan outfits for your days and their clothes appear here. You can also add extra items.</p>`)
+      + `<button class="btn block" id="addExtra" style="margin-top:14px">+ Add item</button>`;
+  };
+
+  // --- more: saved outfits the suitcase allows, and mix & match from packed items
+  const renderMore = () => {
+    const { ids } = packingList(t, outfitById, itemById);
+    const possible = possibleOutfits(t, outfits, ids);
+    const n = combinations(ids, itemById);
+    $('#tbody').innerHTML = `
+      <h2>Also possible with your packing list</h2>
+      ${possible.length ? possible.map(o => `
+        <div class="planned">
+          <div class="thumbs">${outfitThumbs(o, itemById)}</div>
+          <span class="grow">${esc(o.name || 'Outfit')}</span>
+          <button class="chip" data-plan="${o.id}">+ Plan</button>
+        </div>`).join('')
+        : `<p class="muted">${ids.size ? 'No other saved outfit is made only of packed items.' : 'Nothing packed yet.'}</p>`}
+      <div class="panel">
+        <strong>Mix &amp; match</strong>
+        <p class="muted">${n ? `Your packed tops, bottoms and shoes make ${n} combination${n > 1 ? 's' : ''}.`
+          : 'Pack some tops and bottoms (or a dress) to see combinations.'}</p>
+        <a class="btn block${n ? '' : ' disabled'}" ${n ? `href="#/mix/${t.id}"` : ''}>Try combinations</a>
+      </div>`;
+  };
+
+  // --- events
+  $('#tname').addEventListener('input', e => { t.name = e.target.value; save(); });
+  const onDates = () => {
+    const s = $('#tstart').value, e = $('#tend').value;
+    if (!s || !e) return;
+    t.start = s;
+    t.end = e < s ? s : e;
+    $('#tend').value = t.end;
+    save();
+    renderBody();
+  };
+  $('#tstart').addEventListener('change', onDates);
+  $('#tend').addEventListener('change', onDates);
+  $('#tseg').addEventListener('click', e => {
+    const b = e.target.closest('.chip'); if (!b) return;
+    tripSeg = b.dataset.v;
+    renderBody();
+  });
+  $('#tdel').addEventListener('click', async () => {
+    if (!confirm('Delete this trip? Your clothes and outfits stay.')) return;
+    await db.del('trips', t.id);
+    location.hash = '#/trips';
+  });
+  $('#tbody').addEventListener('click', e => {
+    const el = e.target.closest('[data-add],[data-rm],[data-unextra],[data-plan],#addExtra');
+    if (!el) return;
+    if (el.dataset.add) {
+      e.preventDefault();
+      pickOutfit(el.dataset.add);
+    } else if (el.dataset.rm) {
+      const [d, oid] = el.dataset.rm.split('|');
+      t.days[d] = (t.days[d] ?? []).filter(x => x !== oid);
+      save(); renderBody();
+    } else if (el.dataset.unextra) {
+      e.preventDefault(); // inside a <label>: don't toggle the checkbox
+      t.extraItemIds = t.extraItemIds.filter(x => x !== el.dataset.unextra);
+      save(); renderBody();
+    } else if (el.dataset.plan) {
+      pickDay(el.dataset.plan);
+    } else if (el.id === 'addExtra') {
+      pickExtras();
+    }
+  });
+  $('#tbody').addEventListener('change', e => {
+    const id = e.target.dataset.pack; if (!id) return;
+    t.packed = e.target.checked ? [...new Set([...t.packed, id])] : t.packed.filter(x => x !== id);
+    save();
+    renderBody();
+  });
+
+  const pickOutfit = day => openSheet(`Outfit for ${fmtDay(day)}`, outfits.map(o => `
+      <button class="planned pick" data-v="${o.id}">
+        <div class="thumbs">${outfitThumbs(o, itemById)}</div><span class="grow">${esc(o.name || 'Outfit')}</span>
+      </button>`).join(''), oid => {
+    t.days[day] = [...new Set([...(t.days[day] ?? []), oid])];
+    save(); renderBody();
+    return true;
+  });
+
+  const pickDay = oid => openSheet(`Plan “${esc(outfitById[oid].name || 'Outfit')}” on…`, tripDays(t).map(d => `
+      <button class="planned pick" data-v="${d}"><span class="grow">${fmtDay(d)}</span>
+        <small class="muted">${(t.days[d] ?? []).filter(x => outfitById[x]).length || 'nothing'} planned</small></button>`).join(''), d => {
+    t.days[d] = [...new Set([...(t.days[d] ?? []), oid])];
+    save(); renderBody();
+    toast(`Planned on ${fmtDay(d)}`);
+    return true;
+  });
+
+  const pickExtras = () => {
+    const inOutfits = new Set(packingList({ ...t, extraItemIds: [] }, outfitById, itemById).ids);
+    const choices = items.filter(i => !inOutfits.has(i.id)).sort((a, b) => b.createdAt - a.createdAt);
+    const extra = new Set(t.extraItemIds);
+    openSheet('Add to the packing list', choices.length
+      ? `<div class="grid">${choices.map(i => itemCard(i, { selected: extra.has(i.id) })).join('')}</div>`
+      : '<p class="muted">Every item is already on the list.</p>', (iid, el) => {
+      extra.has(iid) ? extra.delete(iid) : extra.add(iid);
+      el.classList.toggle('sel', extra.has(iid));
+      t.extraItemIds = [...extra];
+      save(); renderBody();
+      return false; // keep the sheet open to pick several
+    }, { done: true });
+  };
+
+  renderBody();
+}
+
+// Bottom sheet with a list of choices. onPick(value, element) returns true to close.
+function openSheet(title, bodyHtml, onPick, { done = false } = {}) {
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet-backdrop';
+  sheet.innerHTML = `<div class="sheet" role="dialog" aria-label="${esc(title)}">
+    <div class="row sheet-head"><strong class="grow">${title}</strong>
+      <button class="btn${done ? ' primary' : ''}" data-close>${done ? 'Done' : 'Cancel'}</button></div>
+    <div class="sheet-body">${bodyHtml}</div></div>`;
+  const close = () => sheet.remove();
+  sheet.addEventListener('click', e => {
+    if (e.target === sheet || e.target.closest('[data-close]')) return close();
+    const el = e.target.closest('[data-v],[data-id]');
+    if (el && onPick(el.dataset.v ?? el.dataset.id, el)) close();
+  });
+  window.addEventListener('hashchange', close, { once: true });
+  document.body.append(sheet);
+}
+
+async function mixView(tripId) {
+  const [t, outfits, items] = await Promise.all([db.get('trips', tripId), db.getAll('outfits'), db.getAll('items')]);
+  if (!t) { location.replace('#/trips'); return; }
+  const { ids } = packingList(t, Object.fromEntries(outfits.map(o => [o.id, o])), Object.fromEntries(items.map(i => [i.id, i])));
+  return outfitView('new', { trip: t, itemIds: ids });
 }
 
 // ---------- settings / backup ----------
@@ -559,9 +855,9 @@ const blobToDataUrl = blob => new Promise((resolve, reject) => {
 });
 
 async function exportBackup() {
-  const [items, outfits] = await Promise.all([db.getAll('items'), db.getAll('outfits')]);
+  const [items, outfits, trips] = await Promise.all([db.getAll('items'), db.getAll('outfits'), db.getAll('trips')]);
   const data = {
-    app: 'wardrobe', version: 1, exportedAt: new Date().toISOString(), outfits,
+    app: 'wardrobe', version: 2, exportedAt: new Date().toISOString(), outfits, trips,
     items: await Promise.all(items.map(async i => ({
       ...i, photo: await blobToDataUrl(i.photo), thumb: await blobToDataUrl(i.thumb),
       original: i.original ? await blobToDataUrl(i.original) : null,
@@ -588,6 +884,7 @@ async function importBackup(file) {
     await db.put('items', { ...i, photo: await toBlob(i.photo), thumb: await toBlob(i.thumb), original: i.original ? await toBlob(i.original) : null });
   }
   for (const o of data.outfits) await db.put('outfits', o);
+  for (const t of data.trips ?? []) await db.put('trips', t); // v1 backups have no trips
   return data.items.length;
 }
 
@@ -634,9 +931,10 @@ async function settingsView() {
 
 async function render() {
   const [, route = '', arg] = location.hash.split('/');
-  const tab = { '': 'wardrobe', item: 'wardrobe', add: 'wardrobe', outfits: 'outfits', outfit: 'outfits', settings: 'settings' }[route];
+  const tab = { '': 'wardrobe', item: 'wardrobe', add: 'wardrobe', outfits: 'outfits', outfit: 'outfits',
+    trips: 'trips', trip: 'trips', mix: 'trips', settings: 'settings' }[route];
   document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
-  if (route !== 'outfit') builder = null;
+  if (route !== 'outfit' && route !== 'mix') builder = null;
   if (route !== 'add') addQueue = [];
   window.scrollTo(0, 0);
   try {
@@ -644,6 +942,9 @@ async function render() {
     else if (route === 'add') await addView();
     else if (route === 'outfits') await outfitsView();
     else if (route === 'outfit') await outfitView(arg);
+    else if (route === 'trips') await tripsView();
+    else if (route === 'trip') await tripView(arg);
+    else if (route === 'mix') await mixView(arg);
     else if (route === 'settings') await settingsView();
     else await wardrobeView();
   } catch (err) {
@@ -695,7 +996,7 @@ if ('serviceWorker' in navigator) {
   });
   // a new version took over: reload to run it, but never in the middle of adding/editing something
   const hadController = !!navigator.serviceWorker.controller;
-  const busy = () => /^#\/(add|item|outfit\/)/.test(location.hash);
+  const busy = () => /^#\/(add|item|outfit\/|mix)/.test(location.hash);
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return; // first install, nothing old is running
     if (!busy()) return location.reload();

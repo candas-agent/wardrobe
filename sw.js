@@ -3,7 +3,7 @@
 // onnxruntime from the CDN: cache-first (version-pinned URLs never change).
 // The CLIP model is cached separately by classify.js.
 
-const CACHE = 'wardrobe-app-v5';
+const CACHE = 'wardrobe-app-v6';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'db.js', 'catalog.js', 'classify.js', 'models.js', 'segment.js', 'fingerprint.js', 'labels.json',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
