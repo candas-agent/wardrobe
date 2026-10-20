@@ -480,6 +480,7 @@ const LAYERS = [
   { key: 'acc', label: 'Accessories', groups: ['Accessories'] },
 ];
 const NEW_OUTFIT_STARTS_WITH = ['top', 'bottom', 'shoes']; // other layers start on "none"
+const OPTIONAL_LAYERS = ['outer', 'acc']; // hidden unless switched on, so the main rows get bigger pictures
 
 // mix: { trip, itemIds: Set } — new outfit from a trip's packing list only; saving returns to the trip.
 async function outfitView(id, mix = null) {
@@ -494,9 +495,11 @@ async function outfitView(id, mix = null) {
     const picks = Object.fromEntries(rows.map(r => [r.key,
       o ? r.items.find(i => o.itemIds.includes(i.id))?.id ?? null
         : NEW_OUTFIT_STARTS_WITH.includes(r.key) ? r.items[0]?.id ?? null : null]));
-    builder = { key, id: o?.id ?? null, name: o?.name ?? '', createdAt: o?.createdAt ?? Date.now(), picks };
+    const show = Object.fromEntries(OPTIONAL_LAYERS.map(k => [k, !!picks[k]]));
+    builder = { key, id: o?.id ?? null, name: o?.name ?? '', createdAt: o?.createdAt ?? Date.now(), picks, show };
   }
   const b = builder;
+  const visible = r => !OPTIONAL_LAYERS.includes(r.key) || b.show[r.key];
 
   view.innerHTML = `
     <div class="topbar">
@@ -506,7 +509,9 @@ async function outfitView(id, mix = null) {
     </div>
     ${mix ? '<p class="muted">Only items on the packing list are shown.</p>' : ''}
     <input type="text" id="oname" placeholder="Outfit name, e.g. Friday office" value="${esc(b.name)}">
-    ${rows.map(r => `
+    <div class="chips" id="layerToggles">${rows.filter(r => OPTIONAL_LAYERS.includes(r.key)).map(r =>
+      `<button class="chip${b.show[r.key] ? ' on' : ''}" data-v="${r.key}">${b.show[r.key] ? '✓' : '+'} ${r.label}</button>`).join('')}</div>
+    ${rows.filter(visible).map(r => `
       <div class="layer">
         <div class="layer-label">${r.label}</div>
         <div class="carousel" data-layer="${r.key}">
@@ -515,8 +520,20 @@ async function outfitView(id, mix = null) {
         </div>
       </div>`).join('')}`;
 
+  // size the slots so the visible rows fill the screen between the toggles and the tab bar
+  const cars = $$('.carousel');
+  if (cars.length) {
+    window.scrollTo(0, 0);
+    const layers = $$('.layer'), slot = cars[0].querySelector('.slot');
+    const perRow = layers[1] ? layers[1].offsetTop - layers[0].offsetTop : layers[0].offsetHeight;
+    const overhead = perRow - slot.offsetHeight; // label, padding and gap around a slot
+    const room = document.querySelector('.tabs').getBoundingClientRect().top - layers[0].getBoundingClientRect().top - 6;
+    const w = Math.floor(Math.max(48, Math.min(200, (room / cars.length - overhead) / 1.2)));
+    cars.forEach(c => c.style.setProperty('--slot-w', `${w}px`));
+  }
+
   // center the slot of each row's current pick, then keep picks in sync with scrolling
-  for (const car of $$('.carousel')) {
+  for (const car of cars) {
     const key = car.dataset.layer;
     const slots = [...car.children];
     const centreOn = (slot, behavior = 'instant') =>
@@ -539,8 +556,15 @@ async function outfitView(id, mix = null) {
   }
 
   $('#oname').addEventListener('input', e => { b.name = e.target.value; });
+  $('#layerToggles').addEventListener('click', e => {
+    const t = e.target.closest('.chip'); if (!t) return;
+    const k = t.dataset.v;
+    b.show[k] = !b.show[k];
+    if (b.show[k] && !b.picks[k]) b.picks[k] = rows.find(r => r.key === k).items[0]?.id ?? null;
+    outfitView(id, mix);
+  });
   $('#osave').addEventListener('click', async () => {
-    const itemIds = LAYERS.map(l => b.picks[l.key]).filter(Boolean);
+    const itemIds = rows.filter(visible).map(r => b.picks[r.key]).filter(Boolean);
     if (!itemIds.length) return toast('Pick at least one item');
     await db.put('outfits', { id: b.id ?? db.newId(), name: b.name.trim(), createdAt: b.createdAt, itemIds });
     builder = null;

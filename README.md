@@ -12,8 +12,9 @@ Everything is stored on the device (IndexedDB) — no account, no server.
   If the photo is already in your wardrobe (same file, or the same picture re-saved/resized),
   a notice shows which items were made from it.
 - **Wardrobe** — grid with search (name, notes, type, colour) and type/colour filters.
-- **Outfits** — one swipe carousel per layer (Outerwear, Tops, Bottoms incl. dresses, Shoes,
-  Accessories; each starts with "none"); the centred item of each row is the outfit.
+- **Outfits** — one swipe carousel per layer: Tops, Bottoms (incl. dresses) and Shoes by default,
+  Outerwear and Accessories switched on with the buttons above (each row starts with "none");
+  the centred item of each row is the outfit. Pictures are sized to fill the screen.
 - **Trips** — dates of a trip, one or more saved outfits per day, an automatic **packing list**
   (items of the planned outfits + extras, with "worn N days" and tick-off checkboxes), and
   **more outfits**: saved outfits made only of packed items (plan them in one tap) plus a

@@ -109,7 +109,7 @@ body.downloading .topbar { margin-top: 0; padding-top: 10px; }
 
 /* outfit carousels: one row per layer, the centred slot is the pick */
 .layer { margin-top: 4px; }
-.layer-label { font-size: .75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.layer-label { height: 18px; font-size: .75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
 .carousel { --slot-w: 74px; position: relative; display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none;
   padding: 2px calc(50% + 14px - var(--slot-w) / 2); margin: 0 -14px; } /* % is of the parent, which is 28px narrower */
 .carousel::-webkit-scrollbar { display: none; }
