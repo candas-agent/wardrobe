@@ -17,10 +17,18 @@ export const TOTAL_MB = Math.round(Object.values(MODELS).reduce((s, m) => s + m.
 let ortPromise;
 const sessions = {};
 
+// With the service worker in control, onnxruntime is loaded through it from ./ort/ (cached, works
+// offline); when it has also made the page cross-origin isolated, several threads can be used.
+// Before the service worker takes over (very first launch): single-threaded straight from the CDN.
+const VIA_SW = !!navigator.serviceWorker?.controller;
+export const THREADS = VIA_SW && self.crossOriginIsolated
+  ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
+
 export function getOrt() {
-  ortPromise ??= import(`${ORT_BASE}ort.min.mjs`).then(ort => {
-    ort.env.wasm.wasmPaths = ORT_BASE;
-    ort.env.wasm.numThreads = 1; // GitHub Pages can't send the COOP/COEP headers threads need
+  const base = VIA_SW ? new URL('ort/', location.href).href : ORT_BASE;
+  ortPromise ??= import(`${base}ort.min.mjs`).then(ort => {
+    ort.env.wasm.wasmPaths = base;
+    ort.env.wasm.numThreads = THREADS;
     return ort;
   });
   return ortPromise;
@@ -82,10 +90,31 @@ export function getSession(name) {
   return sessions[name];
 }
 
-// The wasm backend runs one inference at a time; queue runs so models never overlap.
-let queue = Promise.resolve();
-export function run(session, feeds) {
-  const p = queue.then(() => session.run(feeds));
-  queue = p.catch(() => {});
-  return p;
+// Creates the sessions ahead of time (e.g. while the photo picker is open) so the first photo is fast.
+export async function warmUp() {
+  if (!(await modelsDownloaded().catch(() => false))) return;
+  for (const name of ['samDecoder', 'samEncoder', 'clip']) await getSession(name).catch(() => {});
+}
+
+// The wasm backend runs one inference at a time. Jobs wait in a queue; higher priority goes first
+// (a tap's outline before type detection), and a job whose result is no longer wanted (stale()) is
+// dropped before it starts.
+export class StaleError extends Error {}
+const pending = [];
+let running = false;
+export function run(session, feeds, { priority = 0, stale } = {}) {
+  return new Promise((resolve, reject) => {
+    pending.push({ session, feeds, priority, stale, resolve, reject });
+    pending.sort((a, b) => b.priority - a.priority); // stable: first-come first-served within a priority
+    pump();
+  });
+}
+async function pump() {
+  if (running || !pending.length) return;
+  const job = pending.shift();
+  if (job.stale?.()) { job.reject(new StaleError()); return pump(); }
+  running = true;
+  try { job.resolve(await job.session.run(job.feeds)); }
+  catch (err) { job.reject(err); }
+  finally { running = false; pump(); }
 }

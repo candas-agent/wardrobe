@@ -140,9 +140,11 @@ body.downloading .topbar { margin-top: 0; padding-top: 10px; }
 .day-head { display: flex; align-items: center; justify-content: space-between; }
 .planned { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 8px; padding: 6px;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; font: inherit; color: inherit; text-align: left; }
-.planned .thumbs { display: flex; gap: 4px; flex: none; }
-.planned .thumbs img { width: 36px; height: 46px; object-fit: contain; background: #fff; border-radius: 6px; }
-.planned.pick { cursor: pointer; }
+.planned .pl-main { flex: 1; min-width: 0; }
+.planned .pl-name { font-size: .82rem; color: var(--muted); margin: 0 0 4px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.planned .thumbs { display: flex; gap: 6px; }
+.planned .thumbs img { flex: 1 1 0; min-width: 0; max-width: 110px; height: 110px; object-fit: contain; background: #fff; border-radius: 8px; }
+button.planned { cursor: pointer; }
 .x { border: 0; background: none; color: var(--muted); font-size: 1.4rem; line-height: 1; padding: 4px 8px; cursor: pointer; }
 .pack-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
 .pack-row input { width: 22px; height: 22px; accent-color: var(--accent); flex: none; }

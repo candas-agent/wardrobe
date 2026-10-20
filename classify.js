@@ -25,10 +25,11 @@ function pixelValues(source) {
 }
 
 // Returns types sorted by probability: [{ id, label, group, p }, ...]
-export async function classifyType(source) {
+// stale(): returns true once the result isn't wanted any more (the job is then skipped if still queued).
+export async function classifyType(source, { stale } = {}) {
   const [ort, session, types] = await Promise.all([getOrt(), getSession('clip'), loadTypes()]);
   const input = new ort.Tensor('float32', pixelValues(source), [1, 3, 224, 224]);
-  const { image_embeds } = await run(session, { pixel_values: input });
+  const { image_embeds } = await run(session, { pixel_values: input }, { stale });
   const v = image_embeds.data;
   const norm = Math.hypot(...v);
   const logits = types.map(t => 100 * t.emb.reduce((s, e, i) => s + e * v[i], 0) / norm);

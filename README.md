@@ -54,6 +54,15 @@ Best results: one item, laid flat or on a hanger, plain background, good light.
 | `sw.js`, `manifest.webmanifest`, `icons/` | offline + installable |
 | `tools/` | Python script that generates `labels.json` |
 
+## Speed
+
+The SAM image encoder is the heavy step (it prepares a photo for tapping). To make it bearable:
+- `sw.js` makes the app cross-origin isolated (adds COOP/COEP headers, serves onnxruntime
+  same-origin under `./ort/`), so onnxruntime can use up to 4 threads — ~3.5x faster.
+- Model sessions are created while the photo picker is open (`models.warmUp()`).
+- One job queue (`models.run`): a tap's outline goes before queued type detection, and type
+  detections that are no longer wanted are dropped before they start.
+
 ## Changing the clothing types
 
 Edit `tools/labels.py`, then regenerate (needs `onnxruntime tokenizers numpy huggingface_hub`):

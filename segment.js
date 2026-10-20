@@ -21,7 +21,7 @@ export async function encode(source) {
       for (let c = 0; c < 3; c++) data[c * 1024 * 1024 + o] = (px[i + c] / 255 - MEAN[c]) / STD[c];
     }
   }
-  const out = await run(session, { pixel_values: new ort.Tensor('float32', data, [1, 3, 1024, 1024]) });
+  const out = await run(session, { pixel_values: new ort.Tensor('float32', data, [1, 3, 1024, 1024]) }); // same priority as type detection, first come first served
   return { W, H, s, nw, nh, emb: out.image_embeddings, pos: out.image_positional_embeddings };
 }
 
@@ -36,7 +36,7 @@ export async function segment(enc, points) {
     input_labels: new ort.Tensor('int64', labels, [1, 1, points.length]),
     image_embeddings: enc.emb,
     image_positional_embeddings: enc.pos,
-  });
+  }, { priority: 2 }); // a tap's outline jumps ahead of queued type detection
   const scores = out.iou_scores.data, masks = out.pred_masks.data;
   const n = 256 * 256;
   const cands = [0, 1, 2].map(k => ({ ...toMask(enc, masks.subarray(k * n, (k + 1) * n)), score: scores[k] }));

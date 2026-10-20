@@ -210,6 +210,7 @@ const addButton = (label, id = 'addFiles') =>
   `<label class="btn primary">${label}<input type="file" accept="image/*" multiple hidden id="${id}" class="add-files"></label>`;
 
 function bindAddButtons() {
+  $$('.add-files').forEach(input => input.addEventListener('click', () => models.warmUp())); // while the picker is open
   $$('.add-files').forEach(input => input.addEventListener('change', () => {
     addQueue = [...input.files];
     addTotal = addQueue.length;
@@ -293,7 +294,7 @@ async function addNext() {
   retag(draft, form, cls, work, true);
   // start the heavy SAM encoder in the background so the first tap feels instant
   draft.enc = seg().then(m => m.encode(work));
-  draft.enc.catch(() => { draft.enc = null; });
+  draft.enc.then(() => { draft.encReady = true; }, () => { draft.enc = null; });
 }
 
 function resetSelection(draft, form, cls) {
@@ -339,12 +340,13 @@ function drawStage(draft) {
 
 async function runSegment(draft, form) {
   const status = $('#segStatus');
-  status.textContent = draft.enc ? 'Finding the item…' : 'Loading…';
+  status.textContent = draft.encReady ? 'Finding the item…' : 'Getting this photo ready for tapping (only the first tap waits)…';
   drawStage(draft);
   try {
     const m = await seg();
     draft.enc ??= m.encode(draft.work);
     const enc = await draft.enc;
+    draft.encReady = true;
     const points = draft.points;
     const res = await m.segment(enc, points);
     if (draft !== currentDraft || points !== draft.points) return; // a newer tap replaced this one
@@ -405,13 +407,13 @@ async function retag(draft, form, cls, source, withType) {
   draft.typeStatus = 'Detecting type…';
   form.syncType();
   try {
-    const ranked = await cls.classifyType(source);
+    const ranked = await cls.classifyType(source, { stale: () => draft.tagToken !== token || draft !== currentDraft });
     if (draft.tagToken !== token) return;
     draft.typeSuggestions = ranked.slice(0, 3);
     if (!draft.typeManual) draft.type = ranked[0].id;
     draft.typeStatus = '';
   } catch (err) {
-    if (draft.tagToken !== token) return;
+    if (draft.tagToken !== token || err instanceof models.StaleError) return;
     draft.typeStatus = `Detection failed: ${err.message}`;
   }
   if (draft === currentDraft && $('#typeSuggest')) form.syncType();
@@ -630,6 +632,13 @@ function combinations(ids, itemById) {
 const outfitThumbs = (o, itemById) =>
   o.itemIds.map(id => itemById[id]).filter(Boolean).map(i => `<img src="${blobUrl(i.thumb)}" alt="">`).join('');
 
+// Outfit as big pictures; the name is shown only if it has one. tag/attrs: wrapper element, extra: trailing buttons.
+const outfitCard = (o, itemById, { tag = 'div', attrs = '', extra = '' } = {}) => `
+  <${tag} class="planned" ${attrs}>
+    <div class="pl-main">${o.name ? `<div class="pl-name">${esc(o.name)}</div>` : ''}<div class="thumbs">${outfitThumbs(o, itemById)}</div></div>
+    ${extra}
+  </${tag}>`;
+
 async function forgetInTrips({ outfitId, itemId }) {
   for (const t of await db.getAll('trips')) {
     let changed = false;
@@ -703,12 +712,8 @@ async function tripView(id) {
       + days.map(d => `
         <div class="day">
           <div class="day-head"><strong>${fmtDay(d)}</strong>${outfits.length ? `<button class="chip" data-add="${d}">+ Outfit</button>` : ''}</div>
-          ${(t.days[d] ?? []).filter(oid => outfitById[oid]).map(oid => `
-            <div class="planned">
-              <div class="thumbs">${outfitThumbs(outfitById[oid], itemById)}</div>
-              <span class="grow">${esc(outfitById[oid].name || 'Outfit')}</span>
-              <button class="x" data-rm="${d}|${oid}" aria-label="Remove">×</button>
-            </div>`).join('')}
+          ${(t.days[d] ?? []).filter(oid => outfitById[oid]).map(oid => outfitCard(outfitById[oid], itemById,
+            { extra: `<button class="x" data-rm="${d}|${oid}" aria-label="Remove">×</button>` })).join('')}
         </div>`).join('')
       + ((parseDate(t.end) - parseDate(t.start)) / 864e5 + 1 > MAX_TRIP_DAYS
         ? `<p class="muted small">Only the first ${MAX_TRIP_DAYS} days are shown.</p>` : '');
@@ -743,12 +748,8 @@ async function tripView(id) {
     const n = combinations(ids, itemById);
     $('#tbody').innerHTML = `
       <h2>Also possible with your packing list</h2>
-      ${possible.length ? possible.map(o => `
-        <div class="planned">
-          <div class="thumbs">${outfitThumbs(o, itemById)}</div>
-          <span class="grow">${esc(o.name || 'Outfit')}</span>
-          <button class="chip" data-plan="${o.id}">+ Plan</button>
-        </div>`).join('')
+      ${possible.length ? possible.map(o => outfitCard(o, itemById,
+          { extra: `<button class="chip" data-plan="${o.id}">+ Plan</button>` })).join('')
         : `<p class="muted">${ids.size ? 'No other saved outfit is made only of packed items.' : 'Nothing packed yet.'}</p>`}
       <div class="panel">
         <strong>Mix &amp; match</strong>
@@ -808,16 +809,14 @@ async function tripView(id) {
     renderBody();
   });
 
-  const pickOutfit = day => openSheet(`Outfit for ${fmtDay(day)}`, outfits.map(o => `
-      <button class="planned pick" data-v="${o.id}">
-        <div class="thumbs">${outfitThumbs(o, itemById)}</div><span class="grow">${esc(o.name || 'Outfit')}</span>
-      </button>`).join(''), oid => {
+  const pickOutfit = day => openSheet(`Outfit for ${fmtDay(day)}`, outfits.map(o =>
+      outfitCard(o, itemById, { tag: 'button', attrs: `data-v="${o.id}"` })).join(''), oid => {
     t.days[day] = [...new Set([...(t.days[day] ?? []), oid])];
     save(); renderBody();
     return true;
   });
 
-  const pickDay = oid => openSheet(`Plan “${esc(outfitById[oid].name || 'Outfit')}” on…`, tripDays(t).map(d => `
+  const pickDay = oid => openSheet(outfitById[oid].name ? `Plan “${esc(outfitById[oid].name)}” on…` : 'Plan on…', tripDays(t).map(d => `
       <button class="planned pick" data-v="${d}"><span class="grow">${fmtDay(d)}</span>
         <small class="muted">${(t.days[d] ?? []).filter(x => outfitById[x]).length || 'nothing'} planned</small></button>`).join(''), d => {
     t.days[d] = [...new Set([...(t.days[d] ?? []), oid])];
