@@ -42,7 +42,7 @@ anything that needs them waits.
   Shoes by default; **+ Outerwear** and **+ Accessories** add their rows. Each row starts with
   “None”; the centred item of each row is the outfit. Pictures are sized to fill the screen.
 - **👤 On me** shows the outfit full screen on your own photo (see Settings): drag an item to move
-  it, pinch to resize, double-tap to put it back, **✕** (or Back) to close. Adjustments are saved
+  it, pinch to resize, double-tap to put it back, hold a shoe to swap left and right, **✕** (or Back) to close. Adjustments are saved
   on the item, so they apply in every outfit.
 - Saved outfits are listed with their **On me picture** (when you have set a photo) and the item
   thumbnails. Pictures are redrawn automatically when your photo or an item's position changes.
@@ -103,7 +103,7 @@ sw.js                  offline cache, cross-origin isolation, onnxruntime proxy
 
 | Store | Record |
 |---|---|
-| `items` | `id, createdAt, type, colour, colour2, name, notes, photo` (JPEG, cut-out on white, ≤1280 px), `thumb` (≤400 px), `original` (the uncut photo or null), `source { sha256, tiny, name, size }` (duplicate check), `cutout` (transparent WebP, ≤900 px, for On me; items saved before On me have none), `fit { dx, dy, s }` (the On me adjustment, in shoulder widths) |
+| `items` | `id, createdAt, type, colour, colour2, name, notes, photo` (JPEG, cut-out on white, ≤1280 px), `thumb` (≤400 px), `original` (the uncut photo or null), `source { sha256, tiny, name, size }` (duplicate check), `cutout` (transparent WebP, ≤900 px, for On me; items saved before On me have none), `fit { dx, dy, s, flip }` (the On me adjustment, in shoulder widths; `flip` swaps the mirrored copy of a single shoe to the other foot) |
 | `outfits` | `id, name, createdAt, itemIds, preview { blob, sig }` (the On me picture and what it was drawn from) |
 | `trips` | `id, name, start, end` (`YYYY-MM-DD`), `days { date: [outfitId] }, extraItemIds, packed, createdAt` |
 | `settings` | `me { photo` (the cropped photo, JPEG ≤1600 px), `cutout` (the same with a transparent background, WebP, or null), `pose { W, H, kpts, ok }` (found on `photo`), `original` (the photo as picked, ≤2400 px), `crop { x, y, w, h }` (in `original` pixels), `points` (the cut-out prompt: body points plus the user's taps), `removeBg, createdAt }`. Photos set before the editor have only `photo, pose, createdAt` |
@@ -140,8 +140,10 @@ All model URLs are pinned to a commit, so a file can't change underneath the app
   - tops and outerwear: the garment's shoulder line on the shoulders;
   - trousers: waist to ankles;
   - shorts and skirts: at the waist;
-  - shoes: on each foot (one mirrored), or once across both feet when the photo shows a pair (two
-    shapes, or a very wide one);
+  - shoes: on each foot with the toes pointing outwards, or once across both feet when the photo
+    shows a pair (two shapes, or a very wide one). For a single shoe the toe direction is read from
+    its outline (the heel end is taller), and the copy that would point inwards is mirrored. When it
+    can't be told (seen from above or the front), the toe is assumed to point right;
   - hat, scarf, belt, bag: head, neck, waist, hand.
 
   The draw order is bottom, shoes, top, outerwear, accessories. Items saved before On me have no

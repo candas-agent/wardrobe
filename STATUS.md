@@ -49,8 +49,11 @@ the app is more mature).
 - **On me is a collage.** Clothes don't wrap around the body or follow bent arms, and the clothes
   worn in your photo show wherever an item is narrower. Placement rules were tuned on a single
   stock photo; drag/pinch fixes individual items.
-- **Shoe pairs:** a pair is recognised as two separate shapes, or one very wide one. A pair
-  photographed overlapping at an angle can still be drawn on each foot.
+- **Shoe pairs:** a pair is recognised as two separate shapes, or one very wide one (wider than
+  2.1× its height). A pair photographed overlapping at an angle can still be drawn on each foot,
+  and a long, flat single shoe seen from the side may be drawn once across both feet.
+- **Single shoes:** which way the toe points is guessed from the outline (heel taller than toe),
+  tested only on drawn outlines so far. Hold the shoe in On me to swap when it's wrong.
 - **Your photo's outline** comes from a 256×256 mask scaled up, so hair and fine edges are a bit
   blocky. A dedicated matting model would do hair better, but costs another 25–45 MB and gives no
   way to fix mistakes by tapping.
@@ -111,3 +114,4 @@ the app is more mature).
 | 21 Oct | `447c7f2` | Shoe pairs placed once |
 | 21 Oct | `e6db1d2` | On me full screen, outfit pictures in the list |
 | 21 Oct | `b7b5502` | Your photo: crop and background removal |
+| 21 Oct | | Single shoes: toes outwards whichever way they were photographed; hold to swap |

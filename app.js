@@ -657,7 +657,7 @@ function artFor(d, item) {
 }
 
 const layerOf = item => LAYERS.find(l => l.groups.includes(typeById[item.type]?.group))?.key;
-const PICTURE_VERSION = 1; // bump when the placement rules change, so saved pictures are redrawn
+const PICTURE_VERSION = 2; // bump when the placement rules change, so saved pictures are redrawn
 const pictureSig = (me, items) => [PICTURE_VERSION, me.createdAt, ...items.map(i => `${i.id}:${JSON.stringify(i.fit ?? null)}`)].join('|');
 
 // The saved outfit picture: the user's photo wearing the items, cropped to the person.
@@ -710,7 +710,9 @@ async function dollView(box, hint, picks) {
   const boxes = i => d.place(me.pose, art[i], worn[i].layer, worn[i].item.type, fits[i]);
   box.innerHTML = `<div class="doll${me.cutout ? ' cut' : ''}" style="aspect-ratio:${W}/${H}"><img class="me" src="${blobUrl(meArt(me))}" alt="">${
     worn.map((p, i) => boxes(i).map((_, k) => `<img class="worn" data-i="${i}" data-k="${k}" src="${art[i].url}" alt="">`).join('')).join('')}</div>`;
-  hint.textContent = worn.length ? 'Drag an item to move it, pinch to resize, double-tap to put it back.' : 'Pick some items first.';
+  const pairs = worn.some((p, i) => boxes(i).length > 1); // a single shoe, drawn on each foot
+  hint.textContent = !worn.length ? 'Pick some items first.'
+    : `Drag an item to move it, pinch to resize, double-tap to put it back.${pairs ? ' Shoes the wrong way round? Hold one to swap them.' : ''}`;
   const stage = box.querySelector('.doll');
   // as big as the screen allows (it changes when the browser goes full screen or the phone turns)
   new ResizeObserver(() => { stage.style.width = `${Math.min(box.clientWidth, box.clientHeight * W / H)}px`; }).observe(box);
@@ -736,7 +738,7 @@ async function dollView(box, hint, picks) {
     return -1;
   };
   const pointers = new Map();
-  let active = -1, moved = false, start = null, lastTap = { t: 0, i: -1 };
+  let active = -1, moved = false, start = null, lastTap = { t: 0, i: -1 }, hold = null;
   const select = i => els.forEach(el => el.classList.toggle('sel', +el.dataset.i === i));
   const save = async i => {
     const item = await db.get('items', worn[i].item.id);
@@ -748,7 +750,19 @@ async function dollView(box, hint, picks) {
   stage.addEventListener('pointerdown', e => {
     stage.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, toPhoto(e));
-    if (pointers.size === 1) { active = hit(toPhoto(e)); moved = false; start = { x: e.clientX, y: e.clientY }; select(active); }
+    clearTimeout(hold);
+    if (pointers.size === 1) {
+      active = hit(toPhoto(e)); moved = false; start = { x: e.clientX, y: e.clientY }; select(active);
+      const i = active;
+      if (i >= 0 && boxes(i).length > 1) hold = setTimeout(() => { // holding a single shoe: swap which foot gets the mirrored copy
+        if (moved || pointers.size !== 1) return;
+        navigator.vibrate?.(30);
+        fits[i].flip = !fits[i].flip;
+        moved = true; // not a tap
+        layout();
+        save(i);
+      }, HOLD_MS);
+    }
   });
   stage.addEventListener('pointermove', e => {
     if (!pointers.has(e.pointerId) || active < 0) return;
@@ -763,14 +777,15 @@ async function dollView(box, hint, picks) {
       if (span(prev) > 10) f.s = Math.max(0.3, Math.min(3, f.s * span(cur) / span(prev)));
       f.dx += (now.x - before.x) / 2 / sw; f.dy += (now.y - before.y) / 2 / sw; // the pinch centre moves half as far
     }
-    moved ||= pointers.size > 1 || Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8;
+    if (!moved && (pointers.size > 1 || Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8)) { moved = true; clearTimeout(hold); }
     layout();
   });
   const end = e => {
+    clearTimeout(hold);
     if (!pointers.delete(e.pointerId) || pointers.size || active < 0) return;
     const i = active;
     if (moved) save(i);
-    else if (Date.now() - lastTap.t < 350 && lastTap.i === i) { // double-tap: back to where it was placed automatically
+    else if (Date.now() - lastTap.t < 350 && lastTap.i === i) { // double-tap: back to where it was placed automatically (a swap stays)
       Object.assign(fits[i], { dx: 0, dy: 0, s: 1 });
       layout();
       save(i);
@@ -780,6 +795,7 @@ async function dollView(box, hint, picks) {
   };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
+  stage.addEventListener('contextmenu', e => e.preventDefault()); // the long-press menu would get in the way of holding a shoe
 }
 
 // ---------- trips ----------

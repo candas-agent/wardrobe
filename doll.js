@@ -90,7 +90,7 @@ export async function itemArt(item) {
   art.getContext('2d').drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
   const data = art.getContext('2d').getImageData(0, 0, box.w, box.h);
   return { blob: await art.convertToBlob({ type: 'image/png' }), w: box.w, h: box.h, alpha: (x, y) => data.data[(y * box.w + x) * 4 + 3],
-    rowWidth: f => rowWidth(data, f), parts: parts(data) };
+    rowWidth: f => rowWidth(data, f), parts: parts(data), toe: toeSide(data) };
 }
 
 function whiteToClear(img) {
@@ -147,6 +147,24 @@ function parts(img) {
   return sizes.filter(n => n > big * 0.25).length; // ignore specks and laces
 }
 
+// Which way a shoe photographed from the side points: 'left', 'right', or null if it can't be told
+// (seen from above or the front, flat sandals). The heel end is taller than the toe (collar, heel).
+function toeSide(img) {
+  const { width: w, height: h, data } = img, heights = [];
+  for (let x = 0; x < w; x++) {
+    let top = -1, bottom = -1;
+    for (let y = 0; y < h; y++) if (data[(y * w + x) * 4 + 3] > 128) { if (top < 0) top = y; bottom = y; }
+    if (top >= 0) heights.push(bottom - top + 1);
+  }
+  const n = Math.floor(heights.length * 0.3);
+  if (n < 3) return null;
+  const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
+  const left = mean(heights.slice(0, n)), right = mean(heights.slice(-n));
+  if (left > right * 1.2) return 'right'; // heel on the left
+  if (right > left * 1.2) return 'left';
+  return null;
+}
+
 // opaque width of the row at fraction f of the height (e.g. a top's shoulder line)
 function rowWidth(img, f) {
   const { width: w, height: h, data } = img, y = Math.min(h - 1, Math.floor(f * h));
@@ -172,8 +190,10 @@ function autoPlace(b, art, layer, type) {
       const w = Math.abs(b.ankles[1].x - b.ankles[0].x) + b.sw * 0.55, h = w * art.h / art.w;
       return [{ x: (b.ankles[0].x + b.ankles[1].x) / 2 - w / 2, y: bottom - h, w, h }];
     }
-    const w = b.sw * 0.5, h = w * art.h / art.w; // a single shoe: on each foot, one of them mirrored
-    return b.ankles.map((a, i) => ({ x: a.x - w / 2, y: bottom - h, w, h, mirror: i === 0 }));
+    // a single shoe: on each foot, toes pointing outwards, so the copy whose toe would point inwards is mirrored
+    // (the foot on the left of the photo wants its toe pointing left); unknown direction: as if pointing right
+    const w = b.sw * 0.5, h = w * art.h / art.w, flipped = art.toe === 'left' ? 1 : 0;
+    return b.ankles.map((a, i) => ({ x: a.x - w / 2, y: bottom - h, w, h, mirror: i === flipped }));
   }
   if (layer === 'bottom' && ['trousers', 'jeans', 'leggings'].includes(type)) { // waist at the hips, hem at the ankles
     const top = b.hip.y - 0.12 * torso, w = byRow(b.hw * 1.9, 0.03);
@@ -193,12 +213,13 @@ function autoPlace(b, art, layer, type) {
   return uniform(byRow(b.sw * (layer === 'outer' ? 1.5 : 1.35), 0.15), b.neck.x, b.neck.y, 0.15);
 }
 
-// fit: { dx, dy, s } — the user's adjustment, moves in shoulder widths and a scale factor
+// fit: { dx, dy, s, flip } — the user's adjustment: moves in shoulder widths, a scale factor, and for a single
+// shoe whether to swap the mirrored copy to the other foot (when its direction was guessed wrong)
 export function place(pose, art, layer, type, fit) {
-  const b = body(pose), { dx = 0, dy = 0, s = 1 } = fit ?? {};
+  const b = body(pose), { dx = 0, dy = 0, s = 1, flip = false } = fit ?? {};
   return autoPlace(b, art, layer, type).map(r => {
     const cx = r.x + r.w / 2 + dx * b.sw, cy = r.y + r.h / 2 + dy * b.sw, w = r.w * s, h = r.h * s;
-    return { x: cx - w / 2, y: cy - h / 2, w, h, mirror: !!r.mirror };
+    return { x: cx - w / 2, y: cy - h / 2, w, h, mirror: 'mirror' in r && r.mirror !== flip };
   });
 }
 
