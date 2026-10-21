@@ -17,8 +17,10 @@ Everything is stored on the device (IndexedDB) — no account, no server.
 - **Outfits** — one swipe carousel per layer: Tops, Bottoms (incl. dresses) and Shoes by default,
   Outerwear and Accessories switched on with the buttons above (each row starts with "none");
   the centred item of each row is the outfit. Pictures are sized to fill the screen.
-  **On me** shows the outfit on a full-length photo of you (a paper doll, set in Settings): drag an
-  item to move it, pinch to resize, double-tap to put it back. Adjustments are saved on the item.
+  **On me** shows the outfit full screen on a full-length photo of you (a paper doll, set in Settings):
+  drag an item to move it, pinch to resize, double-tap to put it back, ✕ to close. Adjustments are
+  saved on the item. Saved outfits get that picture in the Outfits list; it's redrawn when the photo
+  or an item's adjustment changes (not included in backups, redrawn after an import).
 - **Trips** — dates of a trip, one or more saved outfits per day, an automatic **packing list**
   (items of the planned outfits + extras, with "worn N days" and tick-off checkboxes), and
   **more outfits**: saved outfits made only of packed items (plan them in one tap) plus a

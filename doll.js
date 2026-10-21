@@ -189,3 +189,33 @@ export function place(pose, art, layer, type, fit) {
 }
 
 export const shoulderWidth = pose => body(pose).sw;
+
+// The photo with the items drawn on it (pieces: [{ art, boxes }] bottom to top), cropped to the person
+// and the items with a margin. Returns a JPEG blob.
+export async function picture(pose, photoBlob, pieces) {
+  const photo = await createImageBitmap(photoBlob);
+  const k = photo.width / pose.W; // the stored photo is the one the pose was found on, but just in case
+  const xs = [], ys = [];
+  for (const p of pose.kpts) if (p.score > MIN_SCORE) { xs.push(p.x); ys.push(p.y); }
+  for (const { boxes } of pieces) for (const r of boxes) { xs.push(r.x, r.x + r.w); ys.push(r.y, r.y + r.h); }
+  if (!xs.length) xs.push(0, pose.W), ys.push(0, pose.H);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const m = 0.06 * Math.max(x1 - x0, y1 - y0);
+  y0 -= m * 3; // room for the head: only the nose is a keypoint
+  x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0); x1 = Math.min(pose.W, x1 + m); y1 = Math.min(pose.H, y1 + m);
+  const c = new OffscreenCanvas(Math.round((x1 - x0) * k), Math.round((y1 - y0) * k)), ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(photo, -x0 * k, -y0 * k);
+  for (const { art, boxes } of pieces) {
+    const bmp = await createImageBitmap(art.blob);
+    for (const r of boxes) {
+      ctx.save();
+      ctx.translate((r.x - x0) * k + (r.mirror ? r.w * k : 0), (r.y - y0) * k);
+      if (r.mirror) ctx.scale(-1, 1);
+      ctx.drawImage(bmp, 0, 0, r.w * k, r.h * k);
+      ctx.restore();
+    }
+  }
+  const out = fit(c, 900);
+  return out.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+}

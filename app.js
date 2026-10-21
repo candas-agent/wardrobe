@@ -12,6 +12,7 @@ let types = [], typeById = {};
 const filters = { q: '', group: '', colour: '' };
 let addQueue = [], addTotal = 0;
 let currentDraft = null; // draft shown in the add form; late type results for other drafts are dropped
+let working = 0; // jobs that an update reload would lose (e.g. reading the user's photo)
 let builder = null; // outfit being edited: { key, id (null if new), name, createdAt, picks: { layer: itemId|null } }
 
 // ---------- helpers ----------
@@ -499,18 +500,32 @@ async function itemView(id) {
 // ---------- outfits ----------
 
 async function outfitsView() {
-  const [outfits, items] = await Promise.all([db.getAll('outfits'), db.getAll('items')]);
+  const [outfits, items, me] = await Promise.all([db.getAll('outfits'), db.getAll('items'), db.get('settings', 'me')]);
   const byId = Object.fromEntries(items.map(i => [i.id, i]));
   outfits.sort((a, b) => b.createdAt - a.createdAt);
   view.innerHTML = `
     <div class="row"><h1 class="grow">Outfits</h1><a class="btn primary" href="#/outfit/new">+ New</a></div>
     ${outfits.length ? outfits.map(o => {
       const its = o.itemIds.map(id => byId[id]).filter(Boolean);
-      return `<a class="outfit" href="#/outfit/${o.id}">
-        <strong>${esc(o.name || 'Untitled outfit')}</strong> <span class="muted">· ${its.length} items</span>
-        <div class="thumbs">${its.map(i => `<img src="${blobUrl(i.thumb)}" alt="">`).join('')}</div></a>`;
+      return `<a class="outfit" href="#/outfit/${o.id}" data-id="${o.id}">
+        ${me ? `<img class="onme-pic" src="${o.preview ? blobUrl(o.preview.blob) : ''}" alt=""${o.preview ? '' : ' hidden'}>` : ''}
+        <div class="outfit-info"><strong>${esc(o.name || 'Untitled outfit')}</strong> <span class="muted">· ${its.length} items</span>
+        <div class="thumbs">${its.map(i => `<img src="${blobUrl(i.thumb)}" alt="">`).join('')}</div></div></a>`;
     }).join('') : `<div class="empty"><div class="big">✨</div>
       <p>${items.length ? 'No outfits yet. Combine a few items into one.' : 'Add some clothes first, then combine them here.'}</p></div>`}`;
+  if (!me) return;
+  // draw missing or outdated "on me" pictures (new photo, moved items, outfits saved before), one at a time
+  for (const o of outfits) {
+    const its = o.itemIds.map(id => byId[id]).filter(Boolean);
+    if (o.preview?.sig === pictureSig(me, its)) continue;
+    const preview = await outfitPicture(o.itemIds).catch(err => { console.warn(err); return null; });
+    if (!location.hash.startsWith('#/outfits')) return; // left the list
+    const fresh = await db.get('outfits', o.id);
+    if (!fresh || !preview) continue;
+    await db.put('outfits', { ...fresh, preview });
+    const img = $(`.outfit[data-id="${o.id}"] .onme-pic`);
+    if (img) { img.src = blobUrl(preview.blob); img.hidden = false; }
+  }
 }
 
 // One carousel per layer; the centred slot of each row is the outfit. Slot 0 of every row is "none".
@@ -551,10 +566,10 @@ async function outfitView(id, mix = null) {
     </div>
     ${mix ? '<p class="muted">Only items on the packing list are shown.</p>' : ''}
     <input type="text" id="oname" placeholder="Outfit name, e.g. Friday office" value="${esc(b.name)}">
-    <div class="chips" id="layerToggles"><button class="chip${b.onMe ? ' on' : ''}" data-v="me">${b.onMe ? '✓' : '👤'} On me</button>${
+    <div class="chips" id="layerToggles"><button class="chip" data-v="me">👤 On me</button>${
       rows.filter(r => OPTIONAL_LAYERS.includes(r.key)).map(r =>
       `<button class="chip${b.show[r.key] ? ' on' : ''}" data-v="${r.key}">${b.show[r.key] ? '✓' : '+'} ${r.label}</button>`).join('')}</div>
-    ${b.onMe ? '<div id="dollBox"></div>' : rows.filter(visible).map(r => `
+    ${rows.filter(visible).map(r => `
       <div class="layer">
         <div class="layer-label">${r.label}</div>
         <div class="carousel" data-layer="${r.key}">
@@ -598,13 +613,11 @@ async function outfitView(id, mix = null) {
     car.addEventListener('click', e => { const s = e.target.closest('.slot'); if (s) centreOn(s, 'smooth'); });
   }
 
-  if (b.onMe) await dollView($('#dollBox'), rows.filter(visible).map(r => ({ layer: r.key, item: r.items.find(i => i.id === b.picks[r.key]) })));
-
   $('#oname').addEventListener('input', e => { b.name = e.target.value; });
   $('#layerToggles').addEventListener('click', e => {
     const t = e.target.closest('.chip'); if (!t) return;
     const k = t.dataset.v;
-    if (k === 'me') { b.onMe = !b.onMe; return outfitView(id, mix); }
+    if (k === 'me') return openOnMe(rows.filter(visible).map(r => ({ layer: r.key, item: r.items.find(i => i.id === b.picks[r.key]) })));
     b.show[k] = !b.show[k];
     if (b.show[k] && !b.picks[k]) b.picks[k] = rows.find(r => r.key === k).items[0]?.id ?? null;
     outfitView(id, mix);
@@ -612,7 +625,8 @@ async function outfitView(id, mix = null) {
   $('#osave').addEventListener('click', async () => {
     const itemIds = rows.filter(visible).map(r => b.picks[r.key]).filter(Boolean);
     if (!itemIds.length) return toast('Pick at least one item');
-    await db.put('outfits', { id: b.id ?? db.newId(), name: b.name.trim(), createdAt: b.createdAt, itemIds });
+    const preview = await outfitPicture(itemIds);
+    await db.put('outfits', { id: b.id ?? db.newId(), name: b.name.trim(), createdAt: b.createdAt, itemIds, preview });
     builder = null;
     toast('Outfit saved');
     location.hash = back;
@@ -639,9 +653,46 @@ function artFor(d, item) {
   return arts.get(item.id);
 }
 
+const layerOf = item => LAYERS.find(l => l.groups.includes(typeById[item.type]?.group))?.key;
+const PICTURE_VERSION = 1; // bump when the placement rules change, so saved pictures are redrawn
+const pictureSig = (me, items) => [PICTURE_VERSION, me.createdAt, ...items.map(i => `${i.id}:${JSON.stringify(i.fit ?? null)}`)].join('|');
+
+// The saved outfit picture: the user's photo wearing the items, cropped to the person.
+// Returns { blob, sig } or null without a photo of the user.
+async function outfitPicture(itemIds) {
+  const me = await db.get('settings', 'me');
+  if (!me) return null;
+  const items = (await Promise.all(itemIds.map(id => db.get('items', id)))).filter(Boolean);
+  const d = await doll();
+  const worn = items.map(item => ({ item, layer: layerOf(item) })).filter(p => p.layer)
+    .sort((a, b) => DRAW_ORDER.indexOf(a.layer) - DRAW_ORDER.indexOf(b.layer));
+  const art = await Promise.all(worn.map(p => artFor(d, p.item)));
+  const blob = await d.picture(me.pose, me.photo, worn.map((p, i) => ({ art: art[i], boxes: d.place(me.pose, art[i], p.layer, p.item.type, p.item.fit) })));
+  return { blob, sig: pictureSig(me, items) };
+}
+
+// Full-screen "on me" view over everything, closed with ✕ (or Back).
+function openOnMe(picks) {
+  const ov = document.createElement('div');
+  ov.className = 'onme';
+  ov.innerHTML = `<div class="onme-area"></div><p class="onme-hint"></p><button class="onme-close" aria-label="Close">✕</button>`;
+  document.body.append(ov);
+  document.body.classList.add('noscroll');
+  ov.requestFullscreen?.().catch(() => {}); // hides the browser bars too, where allowed
+  const close = () => {
+    ov.remove();
+    document.body.classList.remove('noscroll');
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    window.removeEventListener('hashchange', close);
+  };
+  ov.querySelector('.onme-close').addEventListener('click', close);
+  window.addEventListener('hashchange', close);
+  dollView(ov.querySelector('.onme-area'), ov.querySelector('.onme-hint'), picks);
+}
+
 // The user's photo wearing picks ([{ layer, item }]). Drag an item to move it, pinch to resize, double-tap
 // to put it back. Adjustments are saved on the item, so they apply in every outfit.
-async function dollView(box, picks) {
+async function dollView(box, hint, picks) {
   const me = await db.get('settings', 'me');
   if (!me) {
     box.innerHTML = `<div class="empty"><div class="big">👤</div><p>Add a full-length photo of yourself in
@@ -655,12 +706,11 @@ async function dollView(box, picks) {
   const { W, H } = me.pose;
   const boxes = i => d.place(me.pose, art[i], worn[i].layer, worn[i].item.type, fits[i]);
   box.innerHTML = `<div class="doll" style="aspect-ratio:${W}/${H}"><img class="me" src="${blobUrl(me.photo)}" alt="">${
-    worn.map((p, i) => boxes(i).map((_, k) => `<img class="worn" data-i="${i}" data-k="${k}" src="${art[i].url}" alt="">`).join('')).join('')}</div>
-    <p class="muted small center">${worn.length ? 'Drag an item to move it, pinch to resize, double-tap to put it back.' : 'Pick some items first.'}</p>`;
+    worn.map((p, i) => boxes(i).map((_, k) => `<img class="worn" data-i="${i}" data-k="${k}" src="${art[i].url}" alt="">`).join('')).join('')}</div>`;
+  hint.textContent = worn.length ? 'Drag an item to move it, pinch to resize, double-tap to put it back.' : 'Pick some items first.';
   const stage = box.querySelector('.doll');
-  // as big as fits between the toggles and the tab bar
-  const room = document.querySelector('.tabs').getBoundingClientRect().top - stage.getBoundingClientRect().top - 40;
-  stage.style.width = `${Math.min(box.clientWidth, Math.max(160, room) * W / H)}px`;
+  // as big as the screen allows (it changes when the browser goes full screen or the phone turns)
+  new ResizeObserver(() => { stage.style.width = `${Math.min(box.clientWidth, box.clientHeight * W / H)}px`; }).observe(box);
   const els = [...stage.querySelectorAll('.worn')];
   const layout = () => els.forEach(el => {
     const r = boxes(+el.dataset.i)[+el.dataset.k];
@@ -1027,7 +1077,8 @@ const blobToDataUrl = blob => new Promise((resolve, reject) => {
 async function exportBackup() {
   const [items, outfits, trips, me] = await Promise.all([db.getAll('items'), db.getAll('outfits'), db.getAll('trips'), db.get('settings', 'me')]);
   const data = {
-    app: 'wardrobe', version: 3, exportedAt: new Date().toISOString(), outfits, trips,
+    app: 'wardrobe', version: 3, exportedAt: new Date().toISOString(), trips,
+    outfits: outfits.map(({ preview, ...o }) => o), // "on me" pictures are redrawn after an import
     items: await Promise.all(items.map(async i => ({
       ...i, photo: await blobToDataUrl(i.photo), thumb: await blobToDataUrl(i.thumb),
       original: i.original ? await blobToDataUrl(i.original) : null,
@@ -1112,6 +1163,7 @@ async function settingsView() {
   $('#mePhoto').addEventListener('change', async e => {
     const f = e.target.files[0]; if (!f) return;
     const status = $('#meStatus');
+    working++;
     try {
       const mb = await models.poseMB();
       status.textContent = mb ? `Getting the body finder ready (one-time, ${mb} MB)…` : 'Finding your shoulders, hips and feet…';
@@ -1124,6 +1176,8 @@ async function settingsView() {
     } catch (err) {
       console.error(err);
       status.textContent = `Couldn't use this photo: ${err.message}`;
+    } finally {
+      working--;
     }
   });
   $('#meDel')?.addEventListener('click', async () => {
@@ -1218,12 +1272,17 @@ if ('serviceWorker' in navigator) {
   });
   // a new version took over: reload to run it, but never in the middle of adding/editing something
   const hadController = !!navigator.serviceWorker.controller;
-  const busy = () => /^#\/(add|item|outfit\/|mix)/.test(location.hash);
+  const busy = () => working > 0 || /^#\/(add|item|outfit\/|mix)/.test(location.hash);
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return; // first install, nothing old is running
     if (!busy()) return location.reload();
-    window.addEventListener('hashchange', function later() {
-      if (!busy()) { window.removeEventListener('hashchange', later); location.reload(); }
-    });
+    const later = () => {
+      if (busy()) return;
+      window.removeEventListener('hashchange', later);
+      clearInterval(timer);
+      location.reload();
+    };
+    window.addEventListener('hashchange', later);
+    const timer = setInterval(later, 5000); // also when a job finishes without leaving the page
   });
 }
