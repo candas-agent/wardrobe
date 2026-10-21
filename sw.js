@@ -7,7 +7,7 @@
 // itself is served same-origin under ./ort/ (fetched from the CDN, cache-first), because its
 // thread workers must come from the page's own origin.
 
-const CACHE = 'wardrobe-app-v19';
+const CACHE = 'wardrobe-app-v20';
 const ORT_CDN = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'db.js', 'catalog.js', 'classify.js', 'models.js', 'segment.js', 'fingerprint.js', 'imaging.js', 'doll.js', 'labels.json', 'gpu-check.json',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

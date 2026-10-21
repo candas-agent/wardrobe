@@ -62,9 +62,17 @@ anything that needs them waits.
   phones it opens the share sheet. The browser can clear site data when storage runs low, so
   export now and then.
 - **Me:** a full-length photo of you for On me. Best: standing straight, facing the camera, head to
-  feet, arms a little away from the body, plain background, fitted clothes. The first time, a
-  25 MB body-pose model downloads. You're warned if your shoulders, hips and feet can't be found;
-  items are then placed roughly.
+  feet, arms a little away from the body, plain background, fitted clothes. After picking it:
+  - **Crop:** drag the corners or edges of the frame (or inside it, to move it); **Whole photo**
+    resets it.
+  - **Background:** you're cut out automatically and the background turns light grey. Missed a
+    part of you? Tap it. Something that isn't you (a chair)? Tap it to take it away. Tap a dot to
+    undo it; **Start over** goes back to the automatic outline. Untick **Remove the background**
+    to keep the photo as it is.
+
+  **Edit** reopens both steps on the saved photo (the original is kept, so the crop can grow back).
+  The first time, a 25 MB body-pose model downloads. You're warned if your shoulders, hips and feet
+  can't be found; items are then placed roughly.
 - **AI helpers:** download status and where they run (number of processor cores). An
   **experimental** switch runs tap-to-select on the graphics chip (WebGPU). Off by default: on an
   Android test phone it gave wrong outlines and froze the phone.
@@ -79,7 +87,7 @@ anything that needs them waits.
 
 ```
 index.html ── app.js (UI, hash router: #/ #/add #/item/<id> #/outfits #/outfit/<id|new>
-   │                    #/trips #/trip/<id> #/mix/<tripId> #/settings)
+   │                    #/trips #/trip/<id> #/mix/<tripId> #/settings #/me)
    ├── db.js           IndexedDB wrapper
    ├── catalog.js      type groups, colour palette, labels.json loader
    ├── imaging.js      step-wise high-quality downscaling (avoids moiré)
@@ -98,7 +106,7 @@ sw.js                  offline cache, cross-origin isolation, onnxruntime proxy
 | `items` | `id, createdAt, type, colour, colour2, name, notes, photo` (JPEG, cut-out on white, ≤1280 px), `thumb` (≤400 px), `original` (the uncut photo or null), `source { sha256, tiny, name, size }` (duplicate check), `cutout` (transparent WebP, ≤900 px, for On me; items saved before On me have none), `fit { dx, dy, s }` (the On me adjustment, in shoulder widths) |
 | `outfits` | `id, name, createdAt, itemIds, preview { blob, sig }` (the On me picture and what it was drawn from) |
 | `trips` | `id, name, start, end` (`YYYY-MM-DD`), `days { date: [outfitId] }, extraItemIds, packed, createdAt` |
-| `settings` | `me { photo, pose { W, H, kpts, ok }, createdAt }` |
+| `settings` | `me { photo` (the cropped photo, JPEG ≤1600 px), `cutout` (the same with a transparent background, WebP, or null), `pose { W, H, kpts, ok }` (found on `photo`), `original` (the photo as picked, ≤2400 px), `crop { x, y, w, h }` (in `original` pixels), `points` (the cut-out prompt: body points plus the user's taps), `removeBg, createdAt }`. Photos set before the editor have only `photo, pose, createdAt` |
 
 The models are kept in the Cache API (`wardrobe-model-v1`); `localStorage` holds only the
 graphics-chip preference (`wardrobe-gpu*`). Backup format version 3: everything except outfit
@@ -138,6 +146,12 @@ All model URLs are pinned to a commit, so a file can't change underneath the app
 
   The draw order is bottom, shoes, top, outerwear, accessories. Items saved before On me have no
   transparency, so the white connected to their border is cleared.
+- **Your photo's background:** the pose is found on the cropped photo, then EdgeSAM is prompted
+  with body points: head, shoulders, hips, knees, ankles and the middle of the torso. The wrists
+  are left out because a hand resting on a chair pulled the chair in. The user's taps are added as
+  include (outside the outline) or exclude (inside) points. Only the part of the mask connected to
+  an included point is kept, and the edge is made sharper than for items, which removes specks and
+  a faint haze. The backdrop colour is `BACKDROP` in `doll.js` (`--backdrop` in `style.css`).
 
 ### Speed
 

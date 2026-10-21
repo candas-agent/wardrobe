@@ -5,8 +5,10 @@
 import { getOrt, poseSession, run } from './models.js';
 import { fit } from './imaging.js';
 
+export const BACKDROP = '#e6e6e9'; // shows where the background of the user's photo was removed
+
 // MoveNet keypoints (COCO order)
-const K = { nose: 0, lEar: 3, rEar: 4, lShoulder: 5, rShoulder: 6, lWrist: 9, rWrist: 10, lHip: 11, rHip: 12, lAnkle: 15, rAnkle: 16 };
+const K = { nose: 0, lEar: 3, rEar: 4, lShoulder: 5, rShoulder: 6, lWrist: 9, rWrist: 10, lHip: 11, rHip: 12, lKnee: 13, rKnee: 14, lAnkle: 15, rAnkle: 16 };
 const MIN_SCORE = 0.2;
 
 async function keypoints(source, crop, onProgress) {
@@ -37,6 +39,18 @@ export async function detectPose(source, onProgress) {
   }
   const ok = [K.lShoulder, K.rShoulder, K.lHip, K.rHip, K.lAnkle, K.rAnkle].every(i => kpts[i].score > MIN_SCORE);
   return { W, H, kpts, ok };
+}
+
+// Points on the body to find the person with tap-to-select: head, shoulders, hips, knees, ankles and the
+// middle of the torso. Not the wrists: a hand resting on something (a chair) pulled that in too.
+export function personPoints(pose) {
+  const p = pose.kpts, seen = i => p[i].score > MIN_SCORE;
+  const at = [K.nose, K.lShoulder, K.rShoulder, K.lHip, K.rHip, K.lKnee, K.rKnee, K.lAnkle, K.rAnkle].filter(seen);
+  const pts = at.map(i => ({ x: p[i].x, y: p[i].y, include: true }));
+  const torso = [K.lShoulder, K.rShoulder, K.lHip, K.rHip];
+  if (torso.every(seen)) pts.push({ x: torso.reduce((a, i) => a + p[i].x, 0) / 4, y: torso.reduce((a, i) => a + p[i].y, 0) / 4, include: true });
+  if (!pts.length) pts.push({ x: pose.W / 2, y: pose.H * 0.45, include: true }); // nobody found: guess the middle
+  return pts;
 }
 
 // Body measurements in photo pixels. Without a usable pose, a standing figure filling the photo is assumed.
@@ -191,7 +205,8 @@ export function place(pose, art, layer, type, fit) {
 export const shoulderWidth = pose => body(pose).sw;
 
 // The photo with the items drawn on it (pieces: [{ art, boxes }] bottom to top), cropped to the person
-// and the items with a margin. Returns a JPEG blob.
+// and the items with a margin. photoBlob may be the cut-out of the user (transparent background), drawn
+// on the backdrop. Returns a JPEG blob.
 export async function picture(pose, photoBlob, pieces) {
   const photo = await createImageBitmap(photoBlob);
   const k = photo.width / pose.W; // the stored photo is the one the pose was found on, but just in case
@@ -205,6 +220,8 @@ export async function picture(pose, photoBlob, pieces) {
   x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0); x1 = Math.min(pose.W, x1 + m); y1 = Math.min(pose.H, y1 + m);
   const c = new OffscreenCanvas(Math.round((x1 - x0) * k), Math.round((y1 - y0) * k)), ctx = c.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = BACKDROP;
+  ctx.fillRect(0, 0, c.width, c.height);
   ctx.drawImage(photo, -x0 * k, -y0 * k);
   for (const { art, boxes } of pieces) {
     const bmp = await createImageBitmap(art.blob);

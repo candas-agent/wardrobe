@@ -33,9 +33,8 @@ export async function encode(source) {
   return { W, H, s, nw, nh, emb: out.image_embeddings };
 }
 
-// points: [{ x, y, include }] in source pixels. Returns the distinct candidate masks (up to 4) sorted
-// small -> large, each { canvas (W x H, alpha = mask), bbox, area, score }, plus the index of the best-scoring one.
-export async function segment(enc, points) {
+// points: [{ x, y, include }] in source pixels -> the decoder's scores and 256x256 low-res logits
+async function decode(enc, points) {
   const [ort, session] = await Promise.all([getOrt(), getSession('samDecoder')]);
   const coords = new Float32Array(points.flatMap(p => [p.x * enc.s, p.y * enc.s]));
   const labels = Float32Array.from(points.map(p => (p.include ? 1 : 0)));
@@ -46,7 +45,13 @@ export async function segment(enc, points) {
   }, { priority: 2 }); // a tap's outline jumps ahead of queued type detection
   const scores = out.scores.data, masks = out.masks.data, count = out.masks.dims[1];
   const n = 256 * 256;
-  const low = [...Array(count).keys()].map(k => masks.subarray(k * n, (k + 1) * n));
+  return { scores, low: [...Array(count).keys()].map(k => masks.subarray(k * n, (k + 1) * n)) };
+}
+
+// points: [{ x, y, include }] in source pixels. Returns the distinct candidate masks (up to 4) sorted
+// small -> large, each { canvas (W x H, alpha = mask), bbox, area, score }, plus the index of the best-scoring one.
+export async function segment(enc, points) {
+  const { scores, low } = await decode(enc, points);
   // With one point the outline is ambiguous (pocket, jacket, whole person?): suggest the best score.
   // With several points output 0 is the model's single answer meant for clear prompts; the others
   // tend to grab neighbours (e.g. the trousers under an open jacket).
@@ -60,6 +65,36 @@ export async function segment(enc, points) {
   const cands = keep.map(k => ({ ...toMask(enc, low[k]), score: scores[k] }));
   const order = [...cands.keys()].sort((a, b) => cands[a].area - cands[b].area);
   return { masks: order.map(i => cands[i]), best: order.indexOf(0) }; // keep[0] is the suggestion
+}
+
+// The whole person in the user's photo, prompted with body points (and the user's corrections). One mask:
+// the decoder's single answer for several points. Specks and the faint haze around the person are dropped
+// (only the shape connected to an included point is kept) and the edge is made sharper than for items.
+export async function personMask(enc, points) {
+  const { low } = await decode(enc, points);
+  const logits = Float32Array.from(low[0]);
+  const on = new Uint8Array(256 * 256), stack = [];
+  const gw = Math.ceil(enc.nw / 4), gh = Math.ceil(enc.nh / 4);
+  for (const p of points.filter(p => p.include)) {
+    const x = Math.min(gw - 1, Math.floor(p.x * enc.s / 4)), y = Math.min(gh - 1, Math.floor(p.y * enc.s / 4));
+    stack.push(y * 256 + x);
+  }
+  while (stack.length) {
+    const i = stack.pop();
+    if (on[i] || logits[i] <= 0) continue;
+    on[i] = 1;
+    const x = i % 256;
+    if (x > 0) stack.push(i - 1);
+    if (x < 255) stack.push(i + 1);
+    if (i >= 256) stack.push(i - 256);
+    if (i < 256 * 255) stack.push(i + 256);
+  }
+  for (let i = 0; i < logits.length; i++) { // keep the person and a one-cell band around it, for a smooth edge
+    const x = i % 256;
+    const near = on[i] || (x > 0 && on[i - 1]) || (x < 255 && on[i + 1]) || on[i - 256] || on[i + 256];
+    logits[i] = near ? logits[i] * 2 : -10;
+  }
+  return toMask(enc, logits);
 }
 
 // intersection over union of two low-res masks (logit > 0)
@@ -110,6 +145,16 @@ export function cutout(source, mask) {
   ctx.drawImage(source, x, y, w, h, 0, 0, w, h);
   ctx.globalCompositeOperation = 'destination-in';
   ctx.drawImage(mask.canvas, x, y, w, h, 0, 0, w, h);
+  return c;
+}
+
+// The source with everything outside the mask transparent, same size (so body points still line up).
+export function cutoutFull(source, mask) {
+  const c = new OffscreenCanvas(source.width, source.height);
+  const ctx = c.getContext('2d');
+  ctx.drawImage(source, 0, 0);
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(mask.canvas, 0, 0);
   return c;
 }
 

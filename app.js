@@ -667,7 +667,7 @@ async function outfitPicture(itemIds) {
   const worn = items.map(item => ({ item, layer: layerOf(item) })).filter(p => p.layer)
     .sort((a, b) => DRAW_ORDER.indexOf(a.layer) - DRAW_ORDER.indexOf(b.layer));
   const art = await Promise.all(worn.map(p => artFor(d, p.item)));
-  const blob = await d.picture(me.pose, me.photo, worn.map((p, i) => ({ art: art[i], boxes: d.place(me.pose, art[i], p.layer, p.item.type, p.item.fit) })));
+  const blob = await d.picture(me.pose, meArt(me), worn.map((p, i) => ({ art: art[i], boxes: d.place(me.pose, art[i], p.layer, p.item.type, p.item.fit) })));
   return { blob, sig: pictureSig(me, items) };
 }
 
@@ -705,7 +705,7 @@ async function dollView(box, hint, picks) {
   const fits = worn.map(p => ({ dx: 0, dy: 0, s: 1, ...p.item.fit }));
   const { W, H } = me.pose;
   const boxes = i => d.place(me.pose, art[i], worn[i].layer, worn[i].item.type, fits[i]);
-  box.innerHTML = `<div class="doll" style="aspect-ratio:${W}/${H}"><img class="me" src="${blobUrl(me.photo)}" alt="">${
+  box.innerHTML = `<div class="doll${me.cutout ? ' cut' : ''}" style="aspect-ratio:${W}/${H}"><img class="me" src="${blobUrl(meArt(me))}" alt="">${
     worn.map((p, i) => boxes(i).map((_, k) => `<img class="worn" data-i="${i}" data-k="${k}" src="${art[i].url}" alt="">`).join('')).join('')}</div>`;
   hint.textContent = worn.length ? 'Drag an item to move it, pinch to resize, double-tap to put it back.' : 'Pick some items first.';
   const stage = box.querySelector('.doll');
@@ -1065,6 +1065,267 @@ async function mixView(tripId) {
   return outfitView('new', { trip: t, itemIds: ids });
 }
 
+// ---------- your photo (crop, background) ----------
+// settings 'me': { photo (the cropped photo, JPEG), cutout (same, background transparent, or null), pose (found on
+// photo), original (the photo as picked, to crop again), crop { x, y, w, h } (in original pixels), points (the
+// tap-to-select prompt on photo: body points plus the user's corrections), removeBg, createdAt }
+
+let mePicked = null; // photo just picked in Settings, for the editor (#/me); without one, the saved photo is edited
+
+const fullCrop = img => ({ x: 0, y: 0, w: img.width, h: img.height });
+const sameCrop = (a, b) => a && b && ['x', 'y', 'w', 'h'].every(k => Math.abs(a[k] - b[k]) < 0.5);
+const meArt = me => me.cutout ?? me.photo; // what's shown for the user's photo
+
+async function meView() {
+  const me = await db.get('settings', 'me'), file = mePicked;
+  mePicked = null;
+  if (!file && !me) return location.replace('#/settings'); // e.g. a reload after picking
+  view.innerHTML = `<h1>Your photo</h1><p class="status">Reading photo…</p>`;
+  let bmp;
+  try { bmp = await createImageBitmap(file ?? me.original ?? me.photo); }
+  catch { toast("Couldn't read that image"); return location.replace('#/settings'); }
+  let original = fit(bmp, 2400); // room to crop, but phone photos are bigger than needed
+  if (original === bmp) { original = new OffscreenCanvas(bmp.width, bmp.height); original.getContext('2d').drawImage(bmp, 0, 0); }
+  bmp.close();
+  const old = file ? null : me;
+  const edit = {
+    original, originalBlob: file ? await resizeToBlob(original, 2400, 0.9) : me.original ?? me.photo,
+    crop: old?.crop ?? fullCrop(original), removeBg: old?.removeBg ?? true,
+    points: old?.points ?? null, pointsCrop: old?.points ? old.crop ?? fullCrop(original) : null,
+  };
+  cropStep(edit);
+}
+
+// Step 1: a rectangle over the photo; drag a corner or an edge to resize it, inside it to move it.
+function cropStep(edit) {
+  const { original } = edit;
+  view.innerHTML = `<div class="topbar">
+      <strong class="title">Crop</strong>
+      <button class="btn" id="cancel">Cancel</button><button class="btn primary" id="next">Next</button>
+    </div>
+    <div class="crop-area" id="cropArea"><canvas class="stage crop" id="stage"></canvas></div>
+    <div class="status">Drag the corners or edges so the frame holds just you, head to feet. Drag inside the frame to move it.</div>
+    <div class="row"><button class="btn grow" id="whole">Whole photo</button></div>`;
+  const shown = fit(original, 1200), k = shown.width / original.width; // displayed copy, original pixels -> canvas pixels
+  const stage = $('#stage');
+  stage.width = shown.width;
+  stage.height = shown.height;
+  const crop = { ...edit.crop };
+  const draw = () => {
+    const ctx = stage.getContext('2d'), x = crop.x * k, y = crop.y * k, w = crop.w * k, h = crop.h * k;
+    ctx.drawImage(shown, 0, 0);
+    ctx.fillStyle = 'rgba(0,0,0,.55)';
+    ctx.fillRect(0, 0, stage.width, y);
+    ctx.fillRect(0, y + h, stage.width, stage.height - y - h);
+    ctx.fillRect(0, y, x, h);
+    ctx.fillRect(x + w, y, stage.width - x - w, h);
+    const u = stage.width / stage.getBoundingClientRect().width; // canvas pixels per screen pixel
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2 * u;
+    ctx.strokeRect(x, y, w, h);
+    ctx.lineWidth = 5 * u; // corner marks
+    const m = Math.min(22 * u, w / 3, h / 3);
+    for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]]) {
+      ctx.beginPath();
+      ctx.moveTo(cx + sx * m, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy + sy * m);
+      ctx.stroke();
+    }
+  };
+  requestAnimationFrame(draw); // after layout, so the line widths are known
+
+  const toOrig = e => {
+    const r = stage.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * original.width, y: (e.clientY - r.top) / r.height * original.height };
+  };
+  const minSize = Math.min(original.width, original.height) * 0.1;
+  const area = $('#cropArea'); // a margin around the photo, so a finger can grab the frame at the photo's edge
+  let drag = null;
+  area.addEventListener('pointerdown', e => {
+    const at = toOrig(e), r = stage.getBoundingClientRect();
+    const near = 28 * original.width / r.width; // finger-sized reach, in original pixels
+    const l = Math.abs(at.x - crop.x) < near, rt = Math.abs(at.x - crop.x - crop.w) < near;
+    const t = Math.abs(at.y - crop.y) < near, b = Math.abs(at.y - crop.y - crop.h) < near;
+    const inX = at.x > crop.x - near && at.x < crop.x + crop.w + near, inY = at.y > crop.y - near && at.y < crop.y + crop.h + near;
+    const edges = { l: l && inY, r: !l && rt && inY, t: t && inX, b: !t && b && inX };
+    const inside = at.x > crop.x && at.x < crop.x + crop.w && at.y > crop.y && at.y < crop.y + crop.h;
+    if (!Object.values(edges).some(Boolean) && !inside) return;
+    area.setPointerCapture(e.pointerId);
+    drag = { id: e.pointerId, at, start: { ...crop }, edges, move: !Object.values(edges).some(Boolean) };
+  });
+  area.addEventListener('pointermove', e => {
+    if (drag?.id !== e.pointerId) return;
+    const at = toOrig(e), dx = at.x - drag.at.x, dy = at.y - drag.at.y, s = drag.start, W = original.width, H = original.height;
+    if (drag.move) {
+      crop.x = Math.max(0, Math.min(W - s.w, s.x + dx));
+      crop.y = Math.max(0, Math.min(H - s.h, s.y + dy));
+    } else {
+      let x0 = s.x, y0 = s.y, x1 = s.x + s.w, y1 = s.y + s.h;
+      if (drag.edges.l) x0 = Math.max(0, Math.min(x1 - minSize, x0 + dx));
+      if (drag.edges.r) x1 = Math.min(W, Math.max(x0 + minSize, x1 + dx));
+      if (drag.edges.t) y0 = Math.max(0, Math.min(y1 - minSize, y0 + dy));
+      if (drag.edges.b) y1 = Math.min(H, Math.max(y0 + minSize, y1 + dy));
+      Object.assign(crop, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    }
+    draw();
+  });
+  const end = e => { if (drag?.id === e.pointerId) drag = null; };
+  area.addEventListener('pointerup', end);
+  area.addEventListener('pointercancel', end);
+  $('#whole').addEventListener('click', () => { Object.assign(crop, fullCrop(original)); draw(); });
+  $('#cancel').addEventListener('click', () => { location.hash = '#/settings'; });
+  $('#next').addEventListener('click', () => {
+    edit.crop = { ...crop };
+    backgroundStep(edit);
+  });
+}
+
+// Step 2: find the body, then cut the person out with tap-to-select, prompted with the body points.
+// Tapping outside the outline adds that part, tapping inside removes it, tapping a dot undoes it.
+async function backgroundStep(edit) {
+  const { crop } = edit;
+  let work = new OffscreenCanvas(Math.round(crop.w), Math.round(crop.h));
+  work.getContext('2d').drawImage(edit.original, crop.x, crop.y, crop.w, crop.h, 0, 0, work.width, work.height);
+  work = fit(work, 1600);
+  if (!sameCrop(edit.pointsCrop, crop)) edit.points = null; // the corrections were for another crop
+
+  view.innerHTML = `<div class="topbar">
+      <button class="btn" id="back">Back</button>
+      <strong class="title">Background</strong>
+      <button class="btn primary" id="save" disabled>Save</button>
+    </div>
+    <canvas class="stage" id="stage"></canvas>
+    <div class="status" id="bgStatus">Finding you in the photo…</div>
+    <label class="row"><input type="checkbox" id="removeBg"${edit.removeBg ? ' checked' : ''}><span class="grow">Remove the background</span></label>
+    <div class="row"><button class="btn grow" id="redo">Start over</button></div>`;
+  const stage = $('#stage'), status = $('#bgStatus');
+  stage.width = work.width;
+  stage.height = work.height;
+  const st = { pose: null, enc: null, mask: null, token: null };
+  const d = await doll();
+  const draw = () => {
+    const ctx = stage.getContext('2d');
+    ctx.drawImage(work, 0, 0);
+    if (!edit.removeBg || !st.mask) return;
+    const veil = new OffscreenCanvas(stage.width, stage.height), v = veil.getContext('2d'); // the backdrop, see-through enough to tap a missed part
+    v.globalAlpha = 0.85;
+    v.fillStyle = d.BACKDROP;
+    v.fillRect(0, 0, veil.width, veil.height);
+    v.globalAlpha = 1;
+    v.globalCompositeOperation = 'destination-out';
+    v.drawImage(st.mask.canvas, 0, 0);
+    ctx.drawImage(veil, 0, 0);
+    const r = dotRadius(stage);
+    for (const p of edit.points ?? []) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = p.include ? '#2e9d4a' : '#d23c3c';
+      ctx.fill();
+      ctx.lineWidth = r / 3;
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+    }
+  };
+  draw();
+  const hint = () => {
+    status.textContent = !edit.removeBg ? 'The photo is used as it is.'
+      : !edit.points.some(p => p.include) ? 'Tap on yourself to cut yourself out.'
+      : 'Missed a part of you? Tap it. Something that isn\'t you? Tap it to take it away. Tap a dot to undo it.';
+  };
+  const outline = async () => {
+    const token = st.token = {}, points = edit.points;
+    stage.classList.add('busy');
+    try {
+      const m = await seg();
+      const mask = points.some(p => p.include) ? await m.personMask(st.enc, points) : null;
+      if (token !== st.token) return; // a newer tap
+      st.mask = mask;
+      draw();
+      hint();
+    } catch (err) {
+      console.error(err);
+      status.textContent = `Couldn't cut you out: ${err.message}`;
+    } finally {
+      if (token === st.token) stage.classList.remove('busy');
+    }
+  };
+
+  $('#back').addEventListener('click', () => cropStep(edit)); // also while still working
+  $('#removeBg').addEventListener('change', e => {
+    edit.removeBg = e.target.checked;
+    $('#redo').hidden = !edit.removeBg;
+    stage.classList.toggle('tappable', edit.removeBg && !!st.enc);
+    draw();
+    if (st.enc) hint();
+  });
+  $('#redo').hidden = !edit.removeBg;
+
+  working++; // an update reload now would lose this
+  try {
+    const mb = await models.poseMB();
+    if (mb) status.textContent = `Getting the body finder ready (one-time, ${mb} MB)…`;
+    const m = await seg();
+    const [pose, enc] = await Promise.all([
+      d.detectPose(work, p => { status.textContent = `Getting the body finder ready (one-time, ${mb} MB)… ${Math.round(p * 100)}%`; }),
+      m.encode(work),
+    ]);
+    if (!stage.isConnected) return; // went back or away meanwhile
+    Object.assign(st, { pose, enc });
+    edit.points ??= d.personPoints(pose);
+    edit.pointsCrop = { ...crop };
+    await outline();
+    $('#save').disabled = false;
+    stage.classList.toggle('tappable', edit.removeBg);
+  } catch (err) {
+    console.error(err);
+    status.textContent = `Couldn't use this photo: ${err.message}`;
+    return;
+  } finally {
+    working--;
+  }
+
+  stage.addEventListener('contextmenu', e => e.preventDefault());
+  stage.addEventListener('click', e => {
+    if (!edit.removeBg) return;
+    const r = stage.getBoundingClientRect();
+    const at = { x: (e.clientX - r.left) / r.width * work.width, y: (e.clientY - r.top) / r.height * work.height };
+    const hit = edit.points.findIndex(p => Math.hypot(p.x - at.x, p.y - at.y) < dotRadius(stage) * 1.8);
+    if (hit >= 0) edit.points = edit.points.filter((_, i) => i !== hit);
+    else {
+      const inside = st.mask && st.mask.canvas.getContext('2d').getImageData(Math.floor(at.x), Math.floor(at.y), 1, 1).data[3] > 128;
+      edit.points = [...edit.points, { ...at, include: !inside }];
+    }
+    edit.pointsCrop = { ...crop };
+    outline();
+  });
+  $('#redo').addEventListener('click', () => {
+    edit.points = d.personPoints(st.pose);
+    edit.pointsCrop = { ...crop };
+    outline();
+  });
+  $('#save').addEventListener('click', async () => {
+    $('#save').disabled = true;
+    status.textContent = 'Saving…';
+    working++;
+    try {
+      const m = await seg();
+      const cut = edit.removeBg && st.mask ? m.cutoutFull(work, st.mask) : null;
+      await db.put('settings', {
+        id: 'me', photo: await resizeToBlob(work, 1600, 0.9), cutout: cut ? await resizeToBlob(cut, 1600, 0.9, 'image/webp') : null,
+        pose: st.pose, original: edit.originalBlob, crop, points: edit.points, removeBg: edit.removeBg, createdAt: Date.now(),
+      });
+      navigator.storage?.persist?.();
+      location.hash = '#/settings';
+      if (st.pose.ok) toast('Photo saved');
+    } catch (err) {
+      console.error(err);
+      status.textContent = `Couldn't save: ${err.message}`;
+      $('#save').disabled = false;
+    } finally {
+      working--;
+    }
+  });
+}
+
 // ---------- settings / backup ----------
 
 const blobToDataUrl = blob => new Promise((resolve, reject) => {
@@ -1084,7 +1345,8 @@ async function exportBackup() {
       original: i.original ? await blobToDataUrl(i.original) : null,
       cutout: i.cutout ? await blobToDataUrl(i.cutout) : null,
     }))),
-    me: me ? { ...me, photo: await blobToDataUrl(me.photo) } : null,
+    me: me ? { ...me, photo: await blobToDataUrl(me.photo), cutout: me.cutout ? await blobToDataUrl(me.cutout) : null,
+      original: me.original ? await blobToDataUrl(me.original) : null } : null,
   };
   const name = `wardrobe-backup-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
@@ -1107,7 +1369,10 @@ async function importBackup(file) {
     await db.put('items', { ...i, photo: await toBlob(i.photo), thumb: await toBlob(i.thumb), original: i.original ? await toBlob(i.original) : null,
       cutout: i.cutout ? await toBlob(i.cutout) : null });
   }
-  if (data.me) await db.put('settings', { ...data.me, photo: await toBlob(data.me.photo) }); // v3+
+  if (data.me) { // v3+; the cut-out and original since October 2026
+    await db.put('settings', { ...data.me, photo: await toBlob(data.me.photo), cutout: data.me.cutout ? await toBlob(data.me.cutout) : null,
+      original: data.me.original ? await toBlob(data.me.original) : null });
+  }
   for (const o of data.outfits) await db.put('outfits', o);
   for (const t of data.trips ?? []) await db.put('trips', t); // v1 backups have no trips
   return data.items.length;
@@ -1136,14 +1401,14 @@ async function settingsView() {
     <div class="panel">
       <strong>Me</strong>
       <p class="muted">A full-length photo of you, to see outfits on you (Outfits → On me). It stays on this phone.</p>
-      ${me ? `<img class="me-thumb" src="${blobUrl(me.photo)}" alt="Your photo">` : ''}
+      ${me ? `<img class="me-thumb${me.cutout ? ' cut' : ''}" src="${blobUrl(meArt(me))}" alt="Your photo">` : ''}
       <div class="row">
         <label class="btn grow">${me ? 'Change photo' : 'Add photo'}<input type="file" accept="image/*" hidden id="mePhoto"></label>
-        ${me ? '<button class="btn" id="meDel">Remove</button>' : ''}
+        ${me ? '<a class="btn" href="#/me">Edit</a><button class="btn" id="meDel">Remove</button>' : ''}
       </div>
       <div class="status" id="meStatus">${me && !me.pose.ok ? meWarning : ''}</div>
       <p class="muted small">Best: standing straight, facing the camera, head to feet in the picture, arms a little away
-      from the body, plain background and fitted clothes.</p>
+      from the body, plain background and fitted clothes. You can crop it and remove the background.</p>
     </div>
     <div class="panel">
       <strong>AI helpers</strong>
@@ -1160,25 +1425,10 @@ async function settingsView() {
     <p class="muted" style="font-size:.8rem">Type detection: OpenAI CLIP ViT-B/32. Tap-to-select: EdgeSAM (Segment Anything).
     On me: MoveNet. All run on-device via onnxruntime-web.</p>`;
 
-  $('#mePhoto').addEventListener('change', async e => {
-    const f = e.target.files[0]; if (!f) return;
-    const status = $('#meStatus');
-    working++;
-    try {
-      const mb = await models.poseMB();
-      status.textContent = mb ? `Getting the body finder ready (one-time, ${mb} MB)…` : 'Finding your shoulders, hips and feet…';
-      const bmp = await createImageBitmap(f);
-      const photo = fit(bmp, 1600);
-      const pose = await (await doll()).detectPose(photo, p => { status.textContent = `Getting the body finder ready (one-time, ${mb} MB)… ${Math.round(p * 100)}%`; });
-      await db.put('settings', { id: 'me', photo: await resizeToBlob(photo, 1600, 0.9), pose, createdAt: Date.now() });
-      await settingsView();
-      if (pose.ok) toast('Photo saved');
-    } catch (err) {
-      console.error(err);
-      status.textContent = `Couldn't use this photo: ${err.message}`;
-    } finally {
-      working--;
-    }
+  $('#mePhoto').addEventListener('click', () => models.warmUp()); // tap-to-select gets ready while the picker is open
+  $('#mePhoto').addEventListener('change', e => {
+    mePicked = e.target.files[0];
+    if (mePicked) location.hash = '#/me';
   });
   $('#meDel')?.addEventListener('click', async () => {
     if (!confirm('Remove your photo?')) return;
@@ -1207,7 +1457,7 @@ async function settingsView() {
 async function render() {
   const [, route = '', arg] = location.hash.split('/');
   const tab = { '': 'wardrobe', item: 'wardrobe', add: 'wardrobe', outfits: 'outfits', outfit: 'outfits',
-    trips: 'trips', trip: 'trips', mix: 'trips', settings: 'settings' }[route];
+    trips: 'trips', trip: 'trips', mix: 'trips', settings: 'settings', me: 'settings' }[route];
   document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
   if (route !== 'outfit' && route !== 'mix') builder = null;
   if (route !== 'add') addQueue = [];
@@ -1221,6 +1471,7 @@ async function render() {
     else if (route === 'trip') await tripView(arg);
     else if (route === 'mix') await mixView(arg);
     else if (route === 'settings') await settingsView();
+    else if (route === 'me') await meView();
     else await wardrobeView();
   } catch (err) {
     console.error(err);
@@ -1272,7 +1523,7 @@ if ('serviceWorker' in navigator) {
   });
   // a new version took over: reload to run it, but never in the middle of adding/editing something
   const hadController = !!navigator.serviceWorker.controller;
-  const busy = () => working > 0 || /^#\/(add|item|outfit\/|mix)/.test(location.hash);
+  const busy = () => working > 0 || /^#\/(add|item|outfit\/|mix|me)/.test(location.hash);
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return; // first install, nothing old is running
     if (!busy()) return location.reload();

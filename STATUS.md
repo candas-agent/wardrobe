@@ -18,6 +18,7 @@ the app is more mature).
 | Outfit builder: swipe carousels per layer, optional Outerwear / Accessories rows | Done | E2E; used on the phone |
 | On me: own photo, automatic placement, drag / pinch / double-tap | Done | E2E with a stock photo; used by the owner (reported doubled shoes, fixed) |
 | On me full screen with ✕; outfit pictures in the Outfits list | Done | E2E with a stock photo; **not yet confirmed on the phone** |
+| Your photo: crop, automatic background removal with tap corrections, edit later | Done | E2E with a stock photo (chair, curtain, card border); **not yet tried on the phone** |
 | Trips: outfits per day, packing list, possible outfits, mix & match | Done | E2E |
 | Backup export / import (v3 includes your photo and cut-outs) | Done | E2E |
 | Offline, installable, self-updating | Done | E2E (offline test); updates confirmed on the phone |
@@ -44,6 +45,11 @@ the app is more mature).
   stock photo; drag/pinch fixes individual items.
 - **Shoe pairs:** a pair is recognised as two separate shapes, or one very wide one. A pair
   photographed overlapping at an angle can still be drawn on each foot.
+- **Your photo's outline** comes from a 256×256 mask scaled up, so hair and fine edges are a bit
+  blocky. A dedicated matting model would do hair better, but costs another 25–45 MB and gives no
+  way to fix mistakes by tapping.
+- **Photos set before the editor** (before 21 October 2026) can be edited, but the crop can't grow
+  beyond the photo that was saved (the full original wasn't kept then).
 - **Items saved before On me** (before 21 October 2026) have no transparent cut-out. The white
   around them is cleared instead, which can eat into white clothes at the edges. Uncut photos with
   a busy background show as a rectangle.
@@ -79,6 +85,7 @@ the app is more mature).
 | Step-wise downscaling | One-step shrinking produced moiré on a fine jacket weave |
 | Local paper doll rather than a cloud try-on | Realistic try-on needs a server (photos leave the phone) or multi-GB models; owner chose local |
 | Adjustments per item, in shoulder widths | Fix once for every outfit; survives a new photo |
+| Background of your photo with EdgeSAM, prompted by body points | No extra download, already proven on the phone, and taps can fix mistakes; a matting model (MODNet/RMBG) would do hair better but adds 25–45 MB and can't be corrected |
 | Update reloads wait for work in progress | A reload during photo processing lost the photo (found in testing) |
 
 ## History
@@ -97,3 +104,4 @@ the app is more mature).
 | 21 Oct | `2217b76` | On me (paper doll) |
 | 21 Oct | `447c7f2` | Shoe pairs placed once |
 | 21 Oct | `e6db1d2` | On me full screen, outfit pictures in the list |
+| 21 Oct | | Your photo: crop and background removal |

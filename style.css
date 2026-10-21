@@ -2,6 +2,7 @@
   --bg: #f6f3ee; --card: #fff; --text: #1d1b19; --muted: #77716a; --line: #e4ded5;
   --accent: #b5562f; --accent-text: #fff; --sel: #b5562f33;
   --radius: 14px; --tabs-h: 64px;
+  --backdrop: #e6e6e9; /* where the background of the user's photo was removed (BACKDROP in doll.js) */
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
@@ -86,6 +87,9 @@ progress { width: 100%; height: 10px; accent-color: var(--accent); }
 
 .stage { display: block; max-width: 100%; max-height: 60vh; margin: 0 auto; border-radius: var(--radius); background: var(--card); touch-action: manipulation; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
 .stage.tappable { cursor: crosshair; }
+.crop-area { padding: 16px; touch-action: none; } /* dragging the frame must not scroll the page */
+.stage.crop { border-radius: 0; cursor: move; max-height: calc(60vh - 32px); }
+.stage.busy { cursor: progress; }
 .stage-tools { justify-content: space-between; flex-wrap: wrap; gap: 0; }
 .cands { display: flex; gap: 8px; }
 .cands:empty { display: none; }
@@ -164,6 +168,7 @@ button.planned { cursor: pointer; }
   touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .doll img { -webkit-user-drag: none; pointer-events: none; }
 .doll .me { display: block; width: 100%; height: 100%; }
+.doll.cut, .me-thumb.cut { background: var(--backdrop); }
 .doll .worn { position: absolute; }
 .doll .worn.sel { filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 4px var(--accent)); }
 .center { text-align: center; }
