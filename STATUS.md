@@ -1,6 +1,6 @@
 # Status
 
-*Updated 21 October 2026. Live version: commit `e6db1d2`, service-worker cache `wardrobe-app-v19`.*
+*Updated 21 October 2026. Live version: commit `b7b5502`, service-worker cache `wardrobe-app-v20`.*
 
 The MVP and everything added since are live at https://candas-agent.github.io/wardrobe/. The
 owner uses it on an **Android phone (Chrome)**; **iPhone has not been tried yet** (planned once
@@ -104,4 +104,4 @@ the app is more mature).
 | 21 Oct | `2217b76` | On me (paper doll) |
 | 21 Oct | `447c7f2` | Shoe pairs placed once |
 | 21 Oct | `e6db1d2` | On me full screen, outfit pictures in the list |
-| 21 Oct | | Your photo: crop and background removal |
+| 21 Oct | `b7b5502` | Your photo: crop and background removal |
