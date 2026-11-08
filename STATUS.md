@@ -32,6 +32,12 @@ the app is more mature).
   (desktop browser), with the same outline quality (45 test taps: mean IoU 0.966 for the best
   outline). On a 4× slowed-down processor: first tap 17.7 s (the photo is prepared in the
   background meanwhile), following taps 0.7 s.
+- **Cut-out edges** (37 photos of clothes without people, outlined by hand, from the
+  `geooff/humanless-fashion-segmentation` dataset; one tap in the middle of the item, best outline):
+  overlap with the hand-made outline 90.8 % → 93.7 % after keeping the doubtful parts that touch
+  the item and redrawing the edge along the photo (guided filter); outline within 3 px of the
+  hand-made one 39 % → 61 %. 33 photos better, 2 slightly worse (at most −0.6 points). The edge
+  takes about 0.16 s per chosen outline in a desktop browser (at most 0.26 s).
 - **Duplicate check:** the 16×16 picture fingerprint mistook about 0.01 % of unrelated photo pairs
   for the same picture; the difference-hash tried first: 2 %.
 - **Body pose (MoveNet Thunder):** body points within about 0.1–0.2 shoulder widths of MediaPipe's

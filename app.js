@@ -430,7 +430,10 @@ async function renderCands(draft, form) {
 
 async function applyMask(draft, form) {
   const m = await seg();
-  const mask = draft.masks[draft.maskIdx];
+  const i = draft.maskIdx;
+  // crisp edge along the photo's own edges, computed once per outline when it's chosen
+  if (!draft.masks[i].refined) draft.masks[i] = { ...m.refine(draft.work, draft.masks[i]), refined: true };
+  const mask = draft.masks[i];
   draft.cut = mask.bbox ? m.cutout(draft.work, mask) : null;
   drawStage(draft);
   retag(draft, form, await classifier(), draft.cut ?? draft.work, true);
