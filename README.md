@@ -203,8 +203,18 @@ change to app files, so installed apps pick up the new version. Add new app file
 ### Tests
 
 End-to-end tests are Playwright (Python) scripts driving a phone-sized headless Chromium against
-the local server. They are kept outside the repository, in `~/scratch/wardrobe-tools/`
-(`e2e_*.py`; `eval_*.py` for the model evaluations). See STATUS.md for what was tested.
+the local server. They are in `tools/dev/` (`e2e_*.py`; `eval_*.py` for the model evaluations,
+`perf_*.py` / `bench_*.py` for timings). See STATUS.md for what was tested.
+
+- Setup: `python3 -m venv .venv && .venv/bin/pip install playwright pillow numpy onnxruntime
+  huggingface_hub && .venv/bin/playwright install chromium` (add `scipy mediapipe` for the
+  pose/paper-doll probes).
+- Each script starts its own `http.server` on the repo root and runs it with
+  `.venv/bin/python tools/dev/<script>.py`.
+- Test photos are not in the repository. The scripts expect them in `/tmp` (e.g.
+  `/tmp/flatlay.jpg`, a stock flat-lay photo). The Chrome profile and downloaded models go in
+  `~/scratch` (override with `WARDROBE_SCRATCH`). Never commit personal photos here: the
+  repository is public.
 
 ---
 
